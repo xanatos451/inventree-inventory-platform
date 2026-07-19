@@ -2,11 +2,17 @@ name: Extension Integration Tests
 
 on:
   push:
+    branches: [main]
     paths:
-      - "**"
+      - "chrome-multi-site-inventree-export/**"
+      - "chrome-svg-capture-extension/**"
+      - ".github/workflows/integration-tests.yml"
   pull_request:
+    branches: [main]
     paths:
-      - "**"
+      - "chrome-multi-site-inventree-export/**"
+      - "chrome-svg-capture-extension/**"
+      - ".github/workflows/integration-tests.yml"
 
 jobs:
   test-extension:
@@ -15,6 +21,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: chrome-multi-site-inventree-export
 
     steps:
       - name: Checkout
@@ -26,7 +35,7 @@ jobs:
           node-version: "20"
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Install Playwright Chromium
         run: npx playwright install chromium

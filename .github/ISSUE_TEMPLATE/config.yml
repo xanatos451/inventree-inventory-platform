@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: General Discussion
+    url: https://github.com/xanatos451/chrome_extensions/discussions
+    about: Ask questions and discuss ideas.
