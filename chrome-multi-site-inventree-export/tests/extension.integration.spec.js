@@ -227,6 +227,80 @@ test("fetches existing categories and updates default category picker", async ()
   await popupPage.close();
 });
 
+test("previews category assignment plan with existing and create steps", async () => {
+  const popupPage = await openPopupPage();
+
+  await popupPage.evaluate(async ({ mockInventreeBaseUrl }) => {
+    const mappingTemplates = {
+      "boltdepot:order-details": {
+        name: { sourceField: "Name", regex: "" },
+        description: { sourceField: "", regex: "" },
+        quantity: { sourceField: "", regex: "" },
+        category: { sourceField: "Category", regex: "" },
+        subcategory: { sourceField: "Subcategory", regex: "" },
+        variant: { sourceField: "", regex: "" },
+      },
+    };
+
+    await new Promise((resolve) => {
+      chrome.runtime.sendMessage(
+        {
+          type: "saveSettings",
+          settings: {
+            inventreeSyncMode: "direct",
+            inventreeUrl: mockInventreeBaseUrl,
+            inventreeToken: "token-abc",
+            inventreeDefaultCategoryId: "12",
+            enableCategoryBuilder: true,
+            mappingTemplates,
+          },
+        },
+        resolve,
+      );
+    });
+
+    await chrome.storage.local.set({
+      lastCapture: {
+        source: "boltdepot",
+        pageType: "order-details",
+        capturedAt: "2026-01-01T00:00:00.000Z",
+        pageTitle: "Order 2556509",
+        pageUrl: "https://boltdepot.com/Account/Order-Details?orderId=2556509",
+        headers: ["Name", "Category", "Subcategory"],
+        rows: [
+          {
+            Name: "Hex Cap Screw",
+            Category: "Fasteners",
+            Subcategory: "Nuts",
+          },
+          {
+            Name: "Flat Washer",
+            Category: "Fasteners",
+            Subcategory: "Washers",
+          },
+        ],
+        pagesScraped: 1,
+      },
+    });
+  }, { mockInventreeBaseUrl });
+
+  await popupPage.reload();
+  await popupPage.selectOption('select[data-map-source="name"]', "Name");
+  await popupPage.selectOption('select[data-map-source="category"]', "Category");
+  await popupPage.selectOption('select[data-map-source="subcategory"]', "Subcategory");
+  await popupPage.click("#previewCategoryAssignmentsBtn");
+
+  await expect(popupPage.locator("#status")).toContainText("Category preview ready for 2 item(s).");
+  await expect(popupPage.locator("#status")).toContainText("Planned category creates: 1.");
+  await expect(popupPage.locator("#categoryPreviewDetails")).toHaveClass(/visible/);
+  await expect(popupPage.locator("#categoryPreviewSummary")).toContainText("Would create segments: 1");
+  await expect(popupPage.locator("#categoryPreviewList")).toContainText("existing: Fasteners");
+  await expect(popupPage.locator("#categoryPreviewList")).toContainText("create: Nuts");
+  await expect(popupPage.locator("#categoryPreviewList")).toContainText("Hardware > Fasteners > Nuts");
+
+  await popupPage.close();
+});
+
 test("direct mode dry-run reports missing required settings", async () => {
   const popupPage = await openPopupPage();
 
