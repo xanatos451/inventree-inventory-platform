@@ -1309,6 +1309,8 @@ function scrapeBoltDepotPageData() {
     return String(value || "").replace(/\s+/g, " ").trim();
   }
 
+  const isOrderDetailsPage = /\/Account\/Order-Details/i.test(location.pathname);
+
   function toAbsolute(raw) {
     try {
       return new URL(raw, location.href).toString();
@@ -1329,6 +1331,8 @@ function scrapeBoltDepotPageData() {
   }
 
   function getChildLinks() {
+    if (isOrderDetailsPage) return [];
+
     const currentPath = location.pathname.replace(/\/+$/, "");
     const links = [];
     const seen = new Set();
@@ -1355,9 +1359,11 @@ function scrapeBoltDepotPageData() {
   function scoreTable(table) {
     const rows = table.querySelectorAll("tr").length;
     const cells = table.querySelectorAll("td,th").length;
+    const productLinks = table.querySelectorAll("a[href]").length;
     const text = normalizeText(table.textContent || "").toLowerCase();
-    const keywordBoost = /part|price|diameter|thread|length|qty|quantity/.test(text) ? 25 : 0;
-    return rows * 3 + cells + keywordBoost;
+    const keywordBoost = /part|price|diameter|thread|length|qty|quantity|item|description|subtotal|sku|order/.test(text) ? 25 : 0;
+    const orderBoost = isOrderDetailsPage && /qty|quantity|item|description|subtotal|price/.test(text) ? 80 : 0;
+    return rows * 3 + cells + keywordBoost + (productLinks * 4) + orderBoost;
   }
 
   function parseHeaders(table) {
@@ -1388,6 +1394,66 @@ function scrapeBoltDepotPageData() {
       }
     }
     return "";
+  }
+
+  function looksLikeBoltDepotProductUrl(url) {
+    if (!url) return false;
+    try {
+      const parsed = new URL(url);
+      if (!/boltdepot\.com$/i.test(parsed.hostname)) return false;
+      return !/^\/Account\//i.test(parsed.pathname);
+    } catch {
+      return false;
+    }
+  }
+
+  function extractQuantity(rowObj, text) {
+    for (const [key, value] of Object.entries(rowObj || {})) {
+      const keyLc = String(key || "").toLowerCase();
+      if (keyLc.includes("qty") || keyLc.includes("quantity")) {
+        const raw = normalizeText(value);
+        if (/^\d+(?:\.\d+)?$/.test(raw)) return raw;
+      }
+    }
+
+    const textMatch = String(text || "").match(/(?:qty|quantity)\s*[:#-]?\s*(\d+(?:\.\d+)?)/i);
+    return textMatch ? textMatch[1] : "";
+  }
+
+  function extractOrderFallbackRows(fallbackImage) {
+    const output = [];
+    const seen = new Set();
+    const anchors = Array.from(document.querySelectorAll("a[href]"));
+
+    for (const anchor of anchors) {
+      const rowUrl = toAbsolute(anchor.getAttribute("href"));
+      if (!looksLikeBoltDepotProductUrl(rowUrl)) continue;
+
+      const container = anchor.closest("tr, li, article, section, div") || anchor.parentElement || anchor;
+      const text = normalizeText(container?.textContent || anchor.textContent || "");
+      if (text.length < 8) continue;
+
+      const partGuess = extractPartNumberByHeaders({ Product: anchor.textContent, Description: text, URL: rowUrl }) || "";
+      const quantity = extractQuantity({}, text);
+      const productName = normalizeText(anchor.textContent || "") || partGuess || "Bolt Depot Item";
+      const imageUrl = firstImageSrc(container) || fallbackImage;
+
+      const dedupeKey = `${rowUrl}|${partGuess}|${productName}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+
+      output.push({
+        Product: productName,
+        Description: text,
+        Quantity: quantity,
+        ProductURL: rowUrl,
+        BoltDepotPartNumber: partGuess,
+        RowImageURL: imageUrl,
+        SourcePageURL: location.href
+      });
+    }
+
+    return output;
   }
 
   const childLinks = getChildLinks();
@@ -1439,21 +1505,39 @@ function scrapeBoltDepotPageData() {
     const rowUrl = link ? toAbsolute(link.getAttribute("href")) : "";
     const rowImage = firstImageSrc(row) || fallbackImage;
     const partGuess = extractPartNumberByHeaders(rowObj);
+    const quantity = extractQuantity(rowObj, rowText);
 
-    const looksData = nonEmpty >= 3 || Boolean(partGuess) || Boolean(rowUrl);
+    const looksOrderItem = isOrderDetailsPage && (Boolean(quantity) || Boolean(rowUrl) || Boolean(partGuess)) && nonEmpty >= 2;
+    const looksData = nonEmpty >= 3 || Boolean(partGuess) || Boolean(rowUrl) || looksOrderItem;
     if (!looksData) continue;
 
     rowObj.ProductURL = rowUrl;
     rowObj.BoltDepotPartNumber = partGuess;
+    if (quantity && !rowObj.Quantity) {
+      rowObj.Quantity = quantity;
+    }
     rowObj.RowImageURL = rowImage;
     rowObj.SourcePageURL = location.href;
     dataRows.push(rowObj);
   }
 
+  if (dataRows.length === 0 && isOrderDetailsPage) {
+    const fallbackRows = extractOrderFallbackRows(fallbackImage);
+    if (fallbackRows.length > 0) {
+      return {
+        ok: true,
+        pageTitle: normalizeText(document.querySelector("h1")?.textContent || document.title || "Bolt Depot"),
+        headers: ["Product", "Description", "Quantity", "ProductURL", "BoltDepotPartNumber", "RowImageURL", "SourcePageURL"],
+        rows: fallbackRows,
+        childLinks
+      };
+    }
+  }
+
   return {
     ok: true,
     pageTitle: normalizeText(document.querySelector("h1")?.textContent || document.title || "Bolt Depot"),
-    headers: Array.from(new Set([...headers, "ProductURL", "BoltDepotPartNumber", "RowImageURL", "SourcePageURL"])),
+    headers: Array.from(new Set([...headers, "ProductURL", "BoltDepotPartNumber", "Quantity", "RowImageURL", "SourcePageURL"])),
     rows: dataRows,
     childLinks
   };
