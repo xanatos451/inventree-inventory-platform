@@ -173,9 +173,11 @@ test("direct mode dry-run reports missing required settings", async () => {
   await expect(popupPage.locator("#status")).toContainText("Dry-run found issues");
   await expect(popupPage.locator("#status")).toContainText("InvenTree Base URL");
   await expect(popupPage.locator("#status")).toContainText("Default Category ID");
+  await expect(popupPage.locator("#status")).toContainText("PASS: Default Supplier ID");
   await expect(popupPage.locator("#dryRunDetails")).toHaveClass(/visible/);
   await expect(popupPage.locator("#dryRunDetailsList")).toContainText("FAIL: InvenTree Base URL");
   await expect(popupPage.locator("#dryRunDetailsList")).toContainText("FAIL: Default Category ID");
+  await expect(popupPage.locator("#dryRunDetailsList")).toContainText("PASS: Default Supplier ID");
 
   await popupPage.close();
 });

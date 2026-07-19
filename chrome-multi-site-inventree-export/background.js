@@ -416,9 +416,11 @@ async function runDirectSyncDryRun(settings) {
   const supplierId = parsePositiveInt(settings.inventreeDefaultSupplierId);
   if (settings.syncSupplierParts) {
     checks.push({
-      ok: Boolean(supplierId),
+      ok: true,
       label: "Default Supplier ID",
-      message: supplierId ? `Configured (${supplierId})` : "Required when supplier-part sync is enabled"
+      message: supplierId
+        ? `Configured (${supplierId})`
+        : "Optional. Supplier-part sync is skipped when no default supplier ID is set."
     });
   }
 
