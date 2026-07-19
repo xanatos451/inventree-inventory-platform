@@ -1592,6 +1592,48 @@ function scrapeMcMasterCategoryData() {
     return match ? match[0].toUpperCase() : "";
   }
 
+  function extractRowsFromProductLinks(sectionImageCandidates) {
+    const out = [];
+    const seen = new Set();
+    const anchors = Array.from(document.querySelectorAll("a[href]"));
+
+    for (const anchor of anchors) {
+      let href = "";
+      try {
+        href = new URL(anchor.getAttribute("href") || "", location.href).toString();
+      } catch {
+        continue;
+      }
+      if (!href || !/mcmaster\.com/i.test(href)) continue;
+
+      const linkText = normalizeText(anchor.textContent || "");
+      const partNumber = extractPartNumber(linkText, href);
+      const isProductPath = /\/\d{5}[A-Z]\d{3,4}\b/i.test(href) || /\/products\//i.test(href);
+      if (!partNumber && !isProductPath) continue;
+
+      const container = anchor.closest("tr, li, article, section, div") || anchor.parentElement || anchor;
+      const containerText = normalizeText(container?.textContent || "");
+      const description = containerText.length > 500 ? containerText.slice(0, 500) : containerText;
+      const name = linkText || (partNumber ? `Part ${partNumber}` : "Product");
+      const rowImageUrl = firstImageSrc(container) || sectionImageCandidates[0] || "";
+
+      const dedupeKey = `${partNumber}|${href}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+
+      out.push({
+        Product: name,
+        Description: description,
+        ProductURL: href,
+        McMasterPartNumber: partNumber,
+        RowImageURL: rowImageUrl,
+        RowImageSource: rowImageUrl && rowImageUrl === sectionImageCandidates[0] ? "section-fallback" : (rowImageUrl ? "row" : "none")
+      });
+    }
+
+    return out;
+  }
+
   function getBodyRows(table) {
     if (table.tBodies && table.tBodies.length > 0) {
       return Array.from(table.tBodies[0].querySelectorAll("tr"));
@@ -1603,9 +1645,10 @@ function scrapeMcMasterCategoryData() {
     const rows = getBodyRows(table);
     const rowCount = rows.length;
     const colCount = Math.max(...rows.map((row) => row.querySelectorAll("td,th").length), 0);
+    const partLinks = table.querySelectorAll("a[href*='/products/'], a[href*='mcmaster.com']").length;
     const headText = normalizeText(table.textContent || "").toLowerCase();
     const hasPartLikeHeader = /part\s*number|stock\s*number|mcmaster/i.test(headText) ? 4 : 0;
-    return rowCount * colCount + hasPartLikeHeader;
+    return rowCount * colCount + hasPartLikeHeader + (partLinks * 5);
   }
 
   const tables = Array.from(document.querySelectorAll("table"));
@@ -1700,7 +1743,18 @@ function scrapeMcMasterCategoryData() {
   }
 
   if (rows.length === 0) {
-    return { ok: false, error: "No product rows found in selected table." };
+    const fallbackRows = extractRowsFromProductLinks(sectionImageCandidates);
+    if (fallbackRows.length === 0) {
+      return { ok: false, error: "No product rows found in selected table." };
+    }
+
+    return {
+      ok: true,
+      headers: ["Product", "Description", "ProductURL", "McMasterPartNumber", "RowImageURL", "RowImageSource"],
+      rows: fallbackRows,
+      pageTitle: normalizeText(document.querySelector("h1")?.textContent || document.title || "McMaster Category"),
+      childLinks
+    };
   }
 
   const titleEl = document.querySelector("h1");
