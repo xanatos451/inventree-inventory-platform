@@ -396,6 +396,20 @@
       color: #32474f;
     }
 
+    .category-picker {
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fffef8;
+      padding: 8px;
+    }
+
+    .category-picker-meta {
+      font-size: 11px;
+      color: #4a595f;
+      margin-bottom: 6px;
+    }
+
     .mapped-preview-wrap {
       margin-top: 8px;
       border: 1px solid var(--line);
@@ -498,6 +512,16 @@
       <div class="grid">
         <input id="inventreeDefaultCategoryId" type="number" min="1" placeholder="Default category ID (required for direct create)" />
         <input id="inventreeDefaultSupplierId" type="number" min="1" placeholder="Default supplier ID (optional)" />
+      </div>
+      <label class="check"><input id="enableCategoryBuilder" type="checkbox" /> Auto-build / assign subcategories from mapped category fields</label>
+      <div class="category-picker">
+        <div class="grid">
+          <button id="fetchCategoriesBtn" class="secondary" type="button">Fetch Existing Categories</button>
+          <select id="existingCategorySelect">
+            <option value="">Select existing category for default/root</option>
+          </select>
+        </div>
+        <div id="categoryPickerMeta" class="category-picker-meta">Fetch categories to pick an existing default/root category.</div>
       </div>
       <div class="grid">
         <input id="inventreeDefaultLocationId" type="number" min="1" placeholder="Default stock location ID (optional)" />

@@ -7,6 +7,7 @@ const els = {
   inventreeSupplierPartApiPath: document.getElementById("inventreeSupplierPartApiPath"),
   inventreeStockItemApiPath: document.getElementById("inventreeStockItemApiPath"),
   inventreeDefaultCategoryId: document.getElementById("inventreeDefaultCategoryId"),
+  enableCategoryBuilder: document.getElementById("enableCategoryBuilder"),
   inventreeDefaultSupplierId: document.getElementById("inventreeDefaultSupplierId"),
   inventreeDefaultLocationId: document.getElementById("inventreeDefaultLocationId"),
   stockQuantityHeaderHint: document.getElementById("stockQuantityHeaderHint"),
@@ -37,6 +38,9 @@ const els = {
   uploadImagesIfSupported: document.getElementById("uploadImagesIfSupported"),
   testPathBtn: document.getElementById("testPathBtn"),
   mappingTemplateScope: document.getElementById("mappingTemplateScope"),
+  fetchCategoriesBtn: document.getElementById("fetchCategoriesBtn"),
+  existingCategorySelect: document.getElementById("existingCategorySelect"),
+  categoryPickerMeta: document.getElementById("categoryPickerMeta"),
   helpBtn: document.getElementById("helpBtn"),
   openFullPageBtn: document.getElementById("openFullPageBtn"),
   helpPanel: document.getElementById("helpPanel"),
@@ -62,6 +66,7 @@ let previewLinkedPages = [];
 let itemLabels = {};
 const selectedLinkedPages = new Set();
 let storedMappingTemplates = {};
+let fetchedInventreeCategories = [];
 const mappingSourceInputs = Array.from(document.querySelectorAll("select[data-map-source]"));
 const mappingRegexInputs = Array.from(document.querySelectorAll("input[data-map-regex]"));
 const MAPPING_TARGET_KEYS = ["name", "description", "quantity", "category", "subcategory", "variant"];
@@ -83,6 +88,21 @@ function initializeLayoutMode() {
 function setStatus(message, kind = "") {
   els.status.textContent = message;
   els.status.className = `status ${kind}`.trim();
+}
+
+function renderFetchedCategories() {
+  if (!els.existingCategorySelect) return;
+  const options = ['<option value="">Select existing category for default/root</option>'];
+  for (const category of fetchedInventreeCategories) {
+    const id = String(category?.pk ?? category?.id ?? "").trim();
+    const label = String(category?.display_path || category?.name || id);
+    if (!id) continue;
+    options.push(`<option value="${escapeHtml(id)}">${escapeHtml(`${label} (#${id})`)}</option>`);
+  }
+  els.existingCategorySelect.innerHTML = options.join("");
+  if (els.inventreeDefaultCategoryId.value) {
+    els.existingCategorySelect.value = els.inventreeDefaultCategoryId.value;
+  }
 }
 
 function normalizeTemplateKey(value) {
@@ -226,6 +246,7 @@ function getHints() {
     inventreeSupplierPartApiPath: els.inventreeSupplierPartApiPath.value.trim() || "/api/company/part/",
     inventreeStockItemApiPath: els.inventreeStockItemApiPath.value.trim() || "/api/stock/",
     inventreeDefaultCategoryId: els.inventreeDefaultCategoryId.value.trim(),
+    enableCategoryBuilder: Boolean(els.enableCategoryBuilder.checked),
     inventreeDefaultSupplierId: els.inventreeDefaultSupplierId.value.trim(),
     inventreeDefaultLocationId: els.inventreeDefaultLocationId.value.trim(),
     stockQuantityHeaderHint: els.stockQuantityHeaderHint.value.trim(),
@@ -255,6 +276,7 @@ function applySettings(settings) {
   els.inventreeSupplierPartApiPath.value = settings.inventreeSupplierPartApiPath || "/api/company/part/";
   els.inventreeStockItemApiPath.value = settings.inventreeStockItemApiPath || "/api/stock/";
   els.inventreeDefaultCategoryId.value = settings.inventreeDefaultCategoryId || "";
+  els.enableCategoryBuilder.checked = Boolean(settings.enableCategoryBuilder);
   els.inventreeDefaultSupplierId.value = settings.inventreeDefaultSupplierId || "";
   els.inventreeDefaultLocationId.value = settings.inventreeDefaultLocationId || "";
   els.stockQuantityHeaderHint.value = settings.stockQuantityHeaderHint || "";
@@ -274,6 +296,7 @@ function applySettings(settings) {
   els.existingMatchStrategy.value = settings.existingMatchStrategy === "update" ? "update" : "skip";
   els.includeImageUrls.checked = Boolean(settings.includeImageUrls);
   els.uploadImagesIfSupported.checked = Boolean(settings.uploadImagesIfSupported);
+  renderFetchedCategories();
   renderMappingTemplateEditors();
 }
 
@@ -291,6 +314,7 @@ function collectSettingsFromForm() {
     inventreeSupplierPartApiPath: els.inventreeSupplierPartApiPath.value.trim() || "/api/company/part/",
     inventreeStockItemApiPath: els.inventreeStockItemApiPath.value.trim() || "/api/stock/",
     inventreeDefaultCategoryId: els.inventreeDefaultCategoryId.value.trim(),
+    enableCategoryBuilder: Boolean(els.enableCategoryBuilder.checked),
     inventreeDefaultSupplierId: els.inventreeDefaultSupplierId.value.trim(),
     inventreeDefaultLocationId: els.inventreeDefaultLocationId.value.trim(),
     stockQuantityHeaderHint: els.stockQuantityHeaderHint.value.trim(),
@@ -639,6 +663,23 @@ async function copySampleConfig(mode) {
   setStatus(`${mode === "direct" ? "Direct" : "Plugin"} sample config copied to clipboard.`, "ok");
 }
 
+async function fetchInventreeCategoriesForPicker() {
+  setStatus("Fetching InvenTree categories...");
+  const response = await sendMessage({
+    type: "fetchInventreeCategories",
+    settings: collectSettingsFromForm()
+  });
+  if (!response?.ok) {
+    throw new Error(response?.error || "Could not fetch categories");
+  }
+  fetchedInventreeCategories = Array.isArray(response.categories) ? response.categories : [];
+  renderFetchedCategories();
+  if (els.categoryPickerMeta) {
+    els.categoryPickerMeta.textContent = `Fetched ${fetchedInventreeCategories.length} categories. Select one to set the default/root category.`;
+  }
+  setStatus(`Fetched ${fetchedInventreeCategories.length} categories.`, "ok");
+}
+
 async function testPartIdPath() {
   clearDryRunDetails();
   setStatus("Testing part ID response path against last response...");
@@ -691,6 +732,21 @@ function wireEvents() {
   els.sourceMode.addEventListener("change", () => {
     renderMappingTemplateEditors();
     renderMappedPreview().catch(() => {});
+  });
+
+  els.existingCategorySelect.addEventListener("change", () => {
+    const value = String(els.existingCategorySelect.value || "").trim();
+    if (value) {
+      els.inventreeDefaultCategoryId.value = value;
+    }
+  });
+
+  els.fetchCategoriesBtn.addEventListener("click", async () => {
+    try {
+      await fetchInventreeCategoriesForPicker();
+    } catch (error) {
+      setStatus(String(error.message || error), "error");
+    }
   });
 
   for (const select of mappingSourceInputs) {

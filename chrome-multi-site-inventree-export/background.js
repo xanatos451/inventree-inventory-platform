@@ -7,6 +7,7 @@ const DEFAULT_SETTINGS = {
   inventreeSupplierPartApiPath: "/api/company/part/",
   inventreeStockItemApiPath: "/api/stock/",
   inventreeDefaultCategoryId: "",
+  enableCategoryBuilder: false,
   inventreeDefaultSupplierId: "",
   inventreeDefaultLocationId: "",
   stockQuantityHeaderHint: "",
@@ -137,6 +138,20 @@ async function handleMessage(message) {
         templateKey: getTemplateKey(capture, merged),
         items: exportObj.items.slice(0, 8)
       };
+    }
+
+    case "fetchInventreeCategories": {
+      const incoming = sanitizeSettings(message?.settings || {});
+      const persisted = await getSettings();
+      const merged = { ...persisted, ...incoming };
+      if (!merged.inventreeUrl) {
+        return { ok: false, error: "InvenTree Base URL is required." };
+      }
+      if (!merged.inventreeToken) {
+        return { ok: false, error: "API token is required." };
+      }
+      const categories = await fetchInventreeCategories(merged);
+      return { ok: true, categories };
     }
 
     case "sendToInventree": {
@@ -308,6 +323,7 @@ async function sendDirectToInventree(capture, settings) {
 
   const supplierId = parsePositiveInt(settings.inventreeDefaultSupplierId);
   const locationId = parsePositiveInt(settings.inventreeDefaultLocationId);
+  const categoryCache = { list: null, byParent: new Map() };
 
   let createdParts = 0;
   let updatedParts = 0;
@@ -321,7 +337,8 @@ async function sendDirectToInventree(capture, settings) {
 
   for (const item of items) {
     try {
-      const result = await createOrUpdatePartInDirectMode(item, settings, categoryId);
+      const resolvedCategoryId = await resolveDirectCategoryIdForItem(item, settings, categoryId, categoryCache);
+      const result = await createOrUpdatePartInDirectMode(item, settings, resolvedCategoryId);
       if (!result.ok || !result.partId) {
         failedParts += 1;
         if (!firstIssue && result.error) firstIssue = result.error;
@@ -542,6 +559,129 @@ async function createOrUpdatePartInDirectMode(item, settings, categoryId) {
   return { ok: true, action: "create", partId };
 }
 
+async function resolveDirectCategoryIdForItem(item, settings, defaultCategoryId, categoryCache) {
+  if (!settings.enableCategoryBuilder) {
+    return defaultCategoryId;
+  }
+
+  const categoryText = String(item.category_text || "").trim();
+  const subcategoryText = String(item.subcategory_text || "").trim();
+  if (!categoryText && !subcategoryText) {
+    return defaultCategoryId;
+  }
+
+  let currentParentId = defaultCategoryId;
+  const chain = [];
+  if (categoryText) chain.push(categoryText);
+  if (subcategoryText && subcategoryText.toLowerCase() !== categoryText.toLowerCase()) chain.push(subcategoryText);
+
+  for (const name of chain) {
+    const resolved = await resolveOrCreateCategoryByName(settings, currentParentId, name, categoryCache);
+    if (!resolved) {
+      return currentParentId;
+    }
+    currentParentId = resolved;
+  }
+
+  return currentParentId;
+}
+
+async function resolveOrCreateCategoryByName(settings, parentId, name, categoryCache) {
+  const trimmedName = String(name || "").trim();
+  if (!trimmedName) return parentId;
+
+  const categories = await ensureCategoryCache(settings, categoryCache);
+  const parentKey = String(parentId || "root");
+  const siblings = categoryCache.byParent.get(parentKey) || [];
+  const existing = siblings.find((item) => String(item?.name || "").trim().toLowerCase() === trimmedName.toLowerCase());
+  if (existing) {
+    return parsePositiveInt(existing.pk ?? existing.id);
+  }
+
+  const response = await inventreeApiRequest(settings, "POST", "/api/part/category/", {
+    name: trimmedName,
+    parent: parentId
+  });
+  if (!response.ok) {
+    return parentId;
+  }
+
+  const created = await response.json();
+  const categoryId = parsePositiveInt(created?.pk ?? created?.id);
+  if (!categoryId) {
+    return parentId;
+  }
+
+  const createdRow = { ...created, pk: categoryId, id: categoryId, name: trimmedName, parent: parentId };
+  categories.push(createdRow);
+  const nextSiblings = categoryCache.byParent.get(parentKey) || [];
+  nextSiblings.push(createdRow);
+  categoryCache.byParent.set(parentKey, nextSiblings);
+  return categoryId;
+}
+
+async function ensureCategoryCache(settings, categoryCache) {
+  if (Array.isArray(categoryCache.list)) {
+    return categoryCache.list;
+  }
+
+  const categories = await fetchInventreeCategories(settings);
+  categoryCache.list = categories;
+  categoryCache.byParent = new Map();
+  for (const category of categories) {
+    const parentKey = String(parsePositiveInt(category?.parent) || "root");
+    const list = categoryCache.byParent.get(parentKey) || [];
+    list.push(category);
+    categoryCache.byParent.set(parentKey, list);
+  }
+  return categories;
+}
+
+async function fetchInventreeCategories(settings) {
+  const all = [];
+  let nextUrl = new URL("/api/part/category/?limit=250", settings.inventreeUrl).toString();
+
+  while (nextUrl) {
+    const response = await fetch(nextUrl, {
+      headers: {
+        Authorization: `Token ${settings.inventreeToken}`
+      }
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Category fetch failed (${response.status}): ${text.slice(0, 200)}`);
+    }
+
+    const payload = await response.json();
+    const rows = Array.isArray(payload) ? payload : Array.isArray(payload?.results) ? payload.results : [];
+    all.push(...rows);
+    nextUrl = typeof payload?.next === "string" && payload.next ? payload.next : "";
+  }
+
+  const byId = new Map();
+  for (const row of all) {
+    const id = parsePositiveInt(row?.pk ?? row?.id);
+    if (id) byId.set(id, row);
+  }
+
+  return all.map((row) => {
+    const id = parsePositiveInt(row?.pk ?? row?.id);
+    const parts = [String(row?.name || "").trim()].filter(Boolean);
+    let parentId = parsePositiveInt(row?.parent);
+    let guard = 0;
+    while (parentId && byId.has(parentId) && guard < 10) {
+      const parent = byId.get(parentId);
+      parts.unshift(String(parent?.name || "").trim());
+      parentId = parsePositiveInt(parent?.parent);
+      guard += 1;
+    }
+    return {
+      ...row,
+      display_path: parts.filter(Boolean).join(" > ")
+    };
+  });
+}
+
 async function upsertSupplierPartForDirectMode(partId, supplierId, item, settings) {
   const sku = String(item.supplier_part_number || "").trim();
   if (!sku) {
@@ -672,6 +812,7 @@ function sanitizeSettings(input) {
     inventreeSupplierPartApiPath: normalizePath(input.inventreeSupplierPartApiPath, "/api/company/part/"),
     inventreeStockItemApiPath: normalizePath(input.inventreeStockItemApiPath, "/api/stock/"),
     inventreeDefaultCategoryId: String(input.inventreeDefaultCategoryId || "").trim(),
+    enableCategoryBuilder: Boolean(input.enableCategoryBuilder),
     inventreeDefaultSupplierId: String(input.inventreeDefaultSupplierId || "").trim(),
     inventreeDefaultLocationId: String(input.inventreeDefaultLocationId || "").trim(),
     stockQuantityHeaderHint: String(input.stockQuantityHeaderHint || "").trim(),
