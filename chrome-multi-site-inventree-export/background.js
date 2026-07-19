@@ -1336,6 +1336,20 @@ function scrapeBoltDepotPageData() {
     const currentPath = location.pathname.replace(/\/+$/, "");
     const links = [];
     const seen = new Set();
+
+    function isLikelyVariantLabel(text) {
+      const value = normalizeText(text || "");
+      if (!value || value.length > 80) return false;
+      return (
+        /\d/.test(value) &&
+        (/\bmm\b/i.test(value) || /\bx\b/i.test(value) || /\b\d+(?:\.\d+)?\b/.test(value))
+      );
+    }
+
+    function isIgnoredPath(path) {
+      return /\/(?:Service|About|Sign-In|ShoppingCart|Quick-Add|Catalog(?:-Tabs)?|Fastener-Information|Accessibility-Statement|Legal-Summary|Contact|Privacy-Policy)\b/i.test(path);
+    }
+
     for (const anchor of Array.from(document.querySelectorAll("a[href]"))) {
       const abs = toAbsolute(anchor.getAttribute("href"));
       if (!abs) continue;
@@ -1348,7 +1362,13 @@ function scrapeBoltDepotPageData() {
       if (!/boltdepot\.com$/i.test(parsed.hostname)) continue;
       const path = parsed.pathname.replace(/\/+$/, "");
       if (!path || path === currentPath) continue;
-      if (!path.startsWith(`${currentPath}_`)) continue;
+      if (isIgnoredPath(path)) continue;
+
+      const label = normalizeText(anchor.textContent || "");
+      const isDirectChild = path.startsWith(`${currentPath}_`);
+      const isVariantChild = !isDirectChild && isLikelyVariantLabel(label) && Boolean(anchor.closest("main, article, section, table, tbody, tr, td, li, ul, ol, div"));
+      if (!isDirectChild && !isVariantChild) continue;
+
       if (seen.has(abs)) continue;
       seen.add(abs);
       links.push(abs);
