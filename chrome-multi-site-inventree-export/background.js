@@ -1396,6 +1396,42 @@ function scrapeBoltDepotPageData() {
     return "";
   }
 
+  function extractRowsFromChildLinks(childLinkList, fallbackImage) {
+    const output = [];
+    const allowed = new Set((childLinkList || []).map((item) => String(item || "").trim()).filter(Boolean));
+    const seen = new Set();
+    const pageTitle = normalizeText(document.querySelector("h1")?.textContent || document.title || "Bolt Depot");
+
+    for (const anchor of Array.from(document.querySelectorAll("a[href]"))) {
+      const rowUrl = toAbsolute(anchor.getAttribute("href"));
+      if (!rowUrl || !allowed.has(rowUrl)) continue;
+
+      const linkText = normalizeText(anchor.textContent || "");
+      if (!linkText) continue;
+
+      const container = anchor.closest("li, tr, div, section") || anchor.parentElement || anchor;
+      const containerText = normalizeText(container?.textContent || "");
+      const description = containerText && containerText !== linkText
+        ? containerText.slice(0, 500)
+        : `${pageTitle} - ${linkText}`;
+      const rowImage = firstImageSrc(container) || fallbackImage;
+      const dedupeKey = `${rowUrl}|${linkText}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+
+      output.push({
+        Product: linkText,
+        Description: description,
+        ProductURL: rowUrl,
+        BoltDepotPartNumber: extractPartNumberByHeaders({ Product: linkText, Description: description }),
+        RowImageURL: rowImage,
+        SourcePageURL: location.href
+      });
+    }
+
+    return output;
+  }
+
   function looksLikeBoltDepotProductUrl(url) {
     if (!url) return false;
     try {
@@ -1459,11 +1495,15 @@ function scrapeBoltDepotPageData() {
   const childLinks = getChildLinks();
   const tables = Array.from(document.querySelectorAll("table"));
   if (tables.length === 0) {
+    const fallbackImage = firstImageSrc(document.querySelector("main") || document.body);
+    const childRows = extractRowsFromChildLinks(childLinks, fallbackImage);
     return {
-      ok: true,
+      ok: childRows.length > 0,
       pageTitle: normalizeText(document.querySelector("h1")?.textContent || document.title || "Bolt Depot"),
-      headers: ["SourcePageURL"],
-      rows: [],
+      headers: childRows.length > 0
+        ? ["Product", "Description", "ProductURL", "BoltDepotPartNumber", "RowImageURL", "SourcePageURL"]
+        : ["SourcePageURL"],
+      rows: childRows,
       childLinks
     };
   }
@@ -1529,6 +1569,19 @@ function scrapeBoltDepotPageData() {
         pageTitle: normalizeText(document.querySelector("h1")?.textContent || document.title || "Bolt Depot"),
         headers: ["Product", "Description", "Quantity", "ProductURL", "BoltDepotPartNumber", "RowImageURL", "SourcePageURL"],
         rows: fallbackRows,
+        childLinks
+      };
+    }
+  }
+
+  if (!isOrderDetailsPage && childLinks.length > 1 && dataRows.length <= 1) {
+    const childRows = extractRowsFromChildLinks(childLinks, fallbackImage);
+    if (childRows.length > 1) {
+      return {
+        ok: true,
+        pageTitle: normalizeText(document.querySelector("h1")?.textContent || document.title || "Bolt Depot"),
+        headers: ["Product", "Description", "ProductURL", "BoltDepotPartNumber", "RowImageURL", "SourcePageURL"],
+        rows: childRows,
         childLinks
       };
     }
