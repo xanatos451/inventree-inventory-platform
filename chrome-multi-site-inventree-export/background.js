@@ -28,6 +28,8 @@ const DEFAULT_SETTINGS = {
   existingMatchStrategy: "skip"
 };
 
+const MAPPING_TARGET_KEYS = ["name", "description", "quantity", "category", "subcategory", "variant"];
+
 const LAST_CAPTURE_KEY = "lastCapture";
 const LAST_SEND_RESPONSE_KEY = "lastSendResponse";
 
@@ -590,6 +592,11 @@ async function createStockItemForDirectMode(partId, locationId, item, settings) 
 }
 
 function parseQuantityForDirectMode(item, settings) {
+  const mapped = Number(String(item?.quantity || "").replace(/[^0-9.\-]/g, ""));
+  if (Number.isFinite(mapped) && mapped > 0) {
+    return mapped;
+  }
+
   const hinted = pickValue(item.raw || {}, [settings.stockQuantityHeaderHint]);
   const hintedNumber = Number(String(hinted || "").replace(/[^0-9.\-]/g, ""));
   if (Number.isFinite(hintedNumber) && hintedNumber > 0) {
@@ -652,6 +659,7 @@ function sanitizeSettings(input) {
     inventreeDefaultLocationId: String(input.inventreeDefaultLocationId || "").trim(),
     stockQuantityHeaderHint: String(input.stockQuantityHeaderHint || "").trim(),
     defaultStockQuantity: String(input.defaultStockQuantity || "").trim(),
+    mappingTemplates: sanitizeMappingTemplates(input.mappingTemplates),
     syncSupplierParts: input.syncSupplierParts !== false,
     syncStockRecords: Boolean(input.syncStockRecords),
     sourceMode: sourceModeSafe,
@@ -668,6 +676,27 @@ function sanitizeSettings(input) {
     partIdResponsePath: String(input.partIdResponsePath || "").trim(),
     existingMatchStrategy: input.existingMatchStrategy === "update" ? "update" : "skip"
   };
+}
+
+function sanitizeMappingTemplates(input) {
+  const templates = input && typeof input === "object" ? input : {};
+  const cleaned = {};
+
+  for (const [key, value] of Object.entries(templates)) {
+    if (!value || typeof value !== "object") continue;
+    const template = {};
+    for (const targetKey of MAPPING_TARGET_KEYS) {
+      const source = value?.[targetKey]?.sourceField;
+      const regex = value?.[targetKey]?.regex;
+      template[targetKey] = {
+        sourceField: String(source || "").trim(),
+        regex: String(regex || "").trim()
+      };
+    }
+    cleaned[String(key).trim() || "default"] = template;
+  }
+
+  return cleaned;
 }
 
 function normalizePath(value, defaultPath) {
@@ -1341,9 +1370,23 @@ function scrapeBoltDepotPageData() {
       const value = normalizeText(text || "");
       if (!value || value.length > 80) return false;
       return (
-        /\d/.test(value) &&
-        (/\bmm\b/i.test(value) || /\bx\b/i.test(value) || /\b\d+(?:\.\d+)?\b/.test(value))
+        /\d/.test(value) && (
+          /\bmm\b/i.test(value) ||
+          /\bx\b/i.test(value) ||
+          /\bM\d+\b/i.test(value) ||
+          /\b\d+\/\d+(?:-\d+)?\b/.test(value)
+        )
       );
+    }
+
+    function getNearbyHeadingText(node) {
+      let current = node?.parentElement || null;
+      for (let depth = 0; current && depth < 5; depth += 1, current = current.parentElement) {
+        const heading = current.querySelector("h1, h2, h3, h4, h5, strong");
+        const text = normalizeText(heading?.textContent || "");
+        if (text) return text.toLowerCase();
+      }
+      return "";
     }
 
     function isIgnoredPath(path) {
@@ -1365,8 +1408,11 @@ function scrapeBoltDepotPageData() {
       if (isIgnoredPath(path)) continue;
 
       const label = normalizeText(anchor.textContent || "");
+      const nearbyHeading = getNearbyHeadingText(anchor);
       const isDirectChild = path.startsWith(`${currentPath}_`);
-      const isVariantChild = !isDirectChild && isLikelyVariantLabel(label) && Boolean(anchor.closest("main, article, section, table, tbody, tr, td, li, ul, ol, div"));
+      const isVariantChild = !isDirectChild
+        && isLikelyVariantLabel(label)
+        && (/diameter|thread|pitch|length|size|dimension|options/i.test(nearbyHeading) || Boolean(anchor.closest("table, tbody, tr, td, li, ul, ol")));
       if (!isDirectChild && !isVariantChild) continue;
 
       if (seen.has(abs)) continue;
@@ -1422,12 +1468,17 @@ function scrapeBoltDepotPageData() {
     const seen = new Set();
     const pageTitle = normalizeText(document.querySelector("h1")?.textContent || document.title || "Bolt Depot");
 
+    function isLikelyItemLabel(text) {
+      const value = normalizeText(text || "");
+      return /\bmm\b/i.test(value) || /\bx\b/i.test(value) || /\bM\d+\b/i.test(value) || /\b\d+\/\d+(?:-\d+)?\b/.test(value) || /\d+/.test(value);
+    }
+
     for (const anchor of Array.from(document.querySelectorAll("a[href]"))) {
       const rowUrl = toAbsolute(anchor.getAttribute("href"));
       if (!rowUrl || !allowed.has(rowUrl)) continue;
 
       const linkText = normalizeText(anchor.textContent || "");
-      if (!linkText) continue;
+      if (!linkText || !isLikelyItemLabel(linkText)) continue;
 
       const container = anchor.closest("li, tr, div, section") || anchor.parentElement || anchor;
       const containerText = normalizeText(container?.textContent || "");
@@ -1937,7 +1988,7 @@ function buildExportPayload(capture, hints) {
 }
 
 function buildExportObject(capture, hints) {
-  const items = capture.rows.map((row) => toInventreeItem(row, hints));
+  const items = capture.rows.map((row) => toInventreeItem(row, hints, capture));
   return {
     source: capture.source || "catalog",
     captured_at: capture.capturedAt,
@@ -1950,9 +2001,17 @@ function buildExportObject(capture, hints) {
   };
 }
 
-function toInventreeItem(row, hints) {
+function toInventreeItem(row, hints, capture) {
+  const mappingTemplate = getMappingTemplateForCapture(capture, hints);
   const rowKeys = Object.keys(row || {});
-  const name = pickValue(row, [
+  const mappedName = pickMappedValue(row, capture, mappingTemplate.name);
+  const mappedDescription = pickMappedValue(row, capture, mappingTemplate.description);
+  const mappedQuantity = pickMappedValue(row, capture, mappingTemplate.quantity);
+  const mappedCategory = pickMappedValue(row, capture, mappingTemplate.category);
+  const mappedSubcategory = pickMappedValue(row, capture, mappingTemplate.subcategory);
+  const mappedVariant = pickMappedValue(row, capture, mappingTemplate.variant);
+
+  const name = mappedName || pickValue(row, [
     hints.nameHeaderHint,
     "Product Name",
     "Product",
@@ -1960,7 +2019,7 @@ function toInventreeItem(row, hints) {
     "Name"
   ]) || row.McMasterPartNumber || row.ASIN || "Product";
 
-  const description = pickValue(row, [
+  const description = mappedDescription || pickValue(row, [
     hints.descriptionHeaderHint,
     "Description",
     "Product",
@@ -1995,11 +2054,67 @@ function toInventreeItem(row, hints) {
     description,
     mpn,
     supplier_part_number: supplierPn,
+    quantity: mappedQuantity || pickValue(row, ["Quantity", "Qty", "Order Quantity"]),
+    category_text: mappedCategory,
+    subcategory_text: mappedSubcategory,
+    variant_text: mappedVariant,
     supplier_link: row.ProductURL || row["Product URL"] || "",
     image_url: imageUrl,
     source_fields: rowKeys,
     raw: row
   };
+}
+
+function getMappingTemplateForCapture(capture, hints) {
+  const templates = hints?.mappingTemplates && typeof hints.mappingTemplates === "object" ? hints.mappingTemplates : {};
+  const source = String(capture?.source || hints?.sourceMode || "default").toLowerCase();
+  const key = source === "mcmaster-carr" ? "mcmaster" : source;
+  const template = templates[key] && typeof templates[key] === "object" ? templates[key] : {};
+  const normalized = {};
+  for (const targetKey of MAPPING_TARGET_KEYS) {
+    normalized[targetKey] = {
+      sourceField: String(template?.[targetKey]?.sourceField || "").trim(),
+      regex: String(template?.[targetKey]?.regex || "").trim()
+    };
+  }
+  return normalized;
+}
+
+function pickMappedValue(row, capture, config) {
+  const sourceField = String(config?.sourceField || "").trim();
+  if (!sourceField) return "";
+
+  let value = "";
+  if (sourceField === "__page_title") {
+    value = String(capture?.pageTitle || "");
+  } else if (sourceField === "__page_url") {
+    value = String(capture?.pageUrl || "");
+  } else {
+    value = String(row?.[sourceField] || "");
+  }
+
+  value = String(value || "").trim();
+  if (!value) return "";
+
+  const regexText = String(config?.regex || "").trim();
+  if (!regexText) return value;
+
+  try {
+    const match = value.match(buildUserRegex(regexText));
+    if (!match) return "";
+    return String(match[1] || match[0] || "").trim();
+  } catch {
+    return value;
+  }
+}
+
+function buildUserRegex(value) {
+  const text = String(value || "").trim();
+  const slashMatch = text.match(/^\/(.*)\/([a-z]*)$/i);
+  if (slashMatch) {
+    return new RegExp(slashMatch[1], slashMatch[2]);
+  }
+  return new RegExp(text, "i");
 }
 
 function pickImageUrl(row, imageHeaderHint) {
@@ -2073,6 +2188,10 @@ function buildCsvText(capture, hints) {
     "description",
     "mpn",
     "supplier_part_number",
+    "quantity",
+    "category_text",
+    "subcategory_text",
+    "variant_text",
     "supplier_link",
     "image_url",
     "source_page_title",
@@ -2094,6 +2213,14 @@ function buildCsvText(capture, hints) {
           return csvEscape(item.mpn);
         case "supplier_part_number":
           return csvEscape(item.supplier_part_number);
+        case "quantity":
+          return csvEscape(item.quantity);
+        case "category_text":
+          return csvEscape(item.category_text);
+        case "subcategory_text":
+          return csvEscape(item.subcategory_text);
+        case "variant_text":
+          return csvEscape(item.variant_text);
         case "supplier_link":
           return csvEscape(item.supplier_link);
         case "image_url":

@@ -36,6 +36,7 @@ const els = {
   includeImageUrls: document.getElementById("includeImageUrls"),
   uploadImagesIfSupported: document.getElementById("uploadImagesIfSupported"),
   testPathBtn: document.getElementById("testPathBtn"),
+  mappingTemplateScope: document.getElementById("mappingTemplateScope"),
   helpBtn: document.getElementById("helpBtn"),
   openFullPageBtn: document.getElementById("openFullPageBtn"),
   helpPanel: document.getElementById("helpPanel"),
@@ -58,6 +59,10 @@ let lastCapture = null;
 let previewLinkedPages = [];
 let itemLabels = {};
 const selectedLinkedPages = new Set();
+let storedMappingTemplates = {};
+const mappingSourceInputs = Array.from(document.querySelectorAll("select[data-map-source]"));
+const mappingRegexInputs = Array.from(document.querySelectorAll("input[data-map-regex]"));
+const MAPPING_TARGET_KEYS = ["name", "description", "quantity", "category", "subcategory", "variant"];
 
 function isFullMode() {
   return new URLSearchParams(window.location.search).get("mode") === "full";
@@ -76,6 +81,89 @@ function initializeLayoutMode() {
 function setStatus(message, kind = "") {
   els.status.textContent = message;
   els.status.className = `status ${kind}`.trim();
+}
+
+function normalizeTemplateKey(value) {
+  const key = String(value || "default").trim().toLowerCase();
+  return key === "mcmaster-carr" ? "mcmaster" : key;
+}
+
+function getCurrentTemplateKey() {
+  if (lastCapture?.source) {
+    return normalizeTemplateKey(lastCapture.source);
+  }
+  return normalizeTemplateKey(els.sourceMode?.value || "default");
+}
+
+function getCurrentTemplate() {
+  const key = getCurrentTemplateKey();
+  const template = storedMappingTemplates[key] && typeof storedMappingTemplates[key] === "object"
+    ? storedMappingTemplates[key]
+    : {};
+  const output = {};
+  for (const targetKey of MAPPING_TARGET_KEYS) {
+    output[targetKey] = {
+      sourceField: String(template?.[targetKey]?.sourceField || "").trim(),
+      regex: String(template?.[targetKey]?.regex || "").trim()
+    };
+  }
+  return output;
+}
+
+function buildFieldOptionsForTemplate() {
+  const options = [
+    { value: "", label: "Auto / None" },
+    { value: "__page_title", label: "Page Title" },
+    { value: "__page_url", label: "Page URL" }
+  ];
+
+  const headers = Array.isArray(lastCapture?.headers) ? lastCapture.headers : [];
+  for (const header of headers) {
+    options.push({ value: header, label: header });
+  }
+  return options;
+}
+
+function renderMappingTemplateEditors() {
+  const options = buildFieldOptionsForTemplate();
+  const template = getCurrentTemplate();
+  const scopeLabel = getCurrentTemplateKey();
+
+  if (els.mappingTemplateScope) {
+    const sourceCount = Math.max(0, options.length - 3);
+    els.mappingTemplateScope.textContent = `Template scope: ${scopeLabel}. Captured source fields available: ${sourceCount}.`;
+  }
+
+  for (const select of mappingSourceInputs) {
+    const targetKey = select.getAttribute("data-map-source") || "";
+    const selectedValue = template?.[targetKey]?.sourceField || "";
+    const finalOptions = [...options];
+    if (selectedValue && !finalOptions.some((item) => item.value === selectedValue)) {
+      finalOptions.push({ value: selectedValue, label: `${selectedValue} (saved)` });
+    }
+    select.innerHTML = finalOptions
+      .map((item) => `<option value="${escapeHtml(item.value)}">${escapeHtml(item.label)}</option>`)
+      .join("");
+    select.value = selectedValue;
+  }
+
+  for (const input of mappingRegexInputs) {
+    const targetKey = input.getAttribute("data-map-regex") || "";
+    input.value = template?.[targetKey]?.regex || "";
+  }
+}
+
+function collectMappingTemplateFromForm() {
+  const template = {};
+  for (const targetKey of MAPPING_TARGET_KEYS) {
+    const select = mappingSourceInputs.find((item) => item.getAttribute("data-map-source") === targetKey);
+    const regexInput = mappingRegexInputs.find((item) => item.getAttribute("data-map-regex") === targetKey);
+    template[targetKey] = {
+      sourceField: String(select?.value || "").trim(),
+      regex: String(regexInput?.value || "").trim()
+    };
+  }
+  return template;
 }
 
 function clearDryRunDetails() {
@@ -146,6 +234,9 @@ function getHints() {
 }
 
 function applySettings(settings) {
+  storedMappingTemplates = settings.mappingTemplates && typeof settings.mappingTemplates === "object"
+    ? settings.mappingTemplates
+    : {};
   els.inventreeSyncMode.value = settings.inventreeSyncMode === "direct" ? "direct" : "plugin";
   els.inventreeUrl.value = settings.inventreeUrl || "";
   els.inventreeToken.value = settings.inventreeToken || "";
@@ -173,9 +264,14 @@ function applySettings(settings) {
   els.existingMatchStrategy.value = settings.existingMatchStrategy === "update" ? "update" : "skip";
   els.includeImageUrls.checked = Boolean(settings.includeImageUrls);
   els.uploadImagesIfSupported.checked = Boolean(settings.uploadImagesIfSupported);
+  renderMappingTemplateEditors();
 }
 
 function collectSettingsFromForm() {
+  const mappingTemplates = {
+    ...storedMappingTemplates,
+    [getCurrentTemplateKey()]: collectMappingTemplateFromForm()
+  };
   return {
     inventreeSyncMode: els.inventreeSyncMode.value === "direct" ? "direct" : "plugin",
     inventreeUrl: els.inventreeUrl.value.trim(),
@@ -189,6 +285,7 @@ function collectSettingsFromForm() {
     inventreeDefaultLocationId: els.inventreeDefaultLocationId.value.trim(),
     stockQuantityHeaderHint: els.stockQuantityHeaderHint.value.trim(),
     defaultStockQuantity: els.defaultStockQuantity.value.trim(),
+    mappingTemplates,
     syncSupplierParts: Boolean(els.syncSupplierParts.checked),
     syncStockRecords: Boolean(els.syncStockRecords.checked),
     ...getHints()
@@ -274,6 +371,10 @@ async function saveSettings() {
   if (!response?.ok) {
     throw new Error(response?.error || "Failed to save settings");
   }
+  storedMappingTemplates = response.settings?.mappingTemplates && typeof response.settings.mappingTemplates === "object"
+    ? response.settings.mappingTemplates
+    : storedMappingTemplates;
+  renderMappingTemplateEditors();
   setStatus("Settings saved.", "ok");
 }
 
@@ -337,6 +438,7 @@ async function capturePage() {
 
   lastCapture = response.capture;
   renderCapture(lastCapture);
+  renderMappingTemplateEditors();
   setStatus(`Captured ${lastCapture.rows.length} rows.`, "ok");
 }
 
@@ -505,6 +607,7 @@ async function loadState() {
   applySettings(response.settings || {});
   lastCapture = response.lastCapture || null;
   renderCapture(lastCapture);
+  renderMappingTemplateEditors();
 }
 
 function wireEvents() {
@@ -524,6 +627,10 @@ function wireEvents() {
       els.helpPanel.scrollIntoView({ behavior: "smooth", block: "start" });
       setStatus("Help opened below. Review settings and examples.");
     }
+  });
+
+  els.sourceMode.addEventListener("change", () => {
+    renderMappingTemplateEditors();
   });
 
   els.copyPluginExampleBtn.addEventListener("click", async () => {

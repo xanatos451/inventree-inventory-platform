@@ -363,6 +363,42 @@
     .dryrun-item.fail {
       color: #8a1e2b;
     }
+
+    .mapping-wrap {
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fffef8;
+      padding: 8px;
+    }
+
+    .mapping-scope {
+      font-size: 11px;
+      color: #4a595f;
+      margin-bottom: 8px;
+    }
+
+    .mapping-grid {
+      display: grid;
+      gap: 8px;
+    }
+
+    .mapping-row {
+      display: grid;
+      grid-template-columns: 140px 1fr 1fr;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .mapping-target {
+      font-size: 11px;
+      font-weight: 700;
+      color: #32474f;
+    }
+
+    body.full-mode .mapping-row {
+      grid-template-columns: 180px 1fr 1fr;
+    }
   </style>
 </head>
 <body>
@@ -465,6 +501,44 @@
       <div class="grid">
         <input id="partIdResponsePath" type="text" placeholder="Part ID response path (e.g. created_parts[].id)" />
         <button id="testPathBtn" class="secondary" type="button">Test Path</button>
+      </div>
+
+      <div class="label">Site Mapping Template</div>
+      <div class="mapping-wrap">
+        <div id="mappingTemplateScope" class="mapping-scope">Template applies to the currently selected source site.</div>
+        <div class="mapping-grid">
+          <div class="mapping-row">
+            <div class="mapping-target">Part Name</div>
+            <select data-map-source="name"></select>
+            <input data-map-regex="name" type="text" placeholder="Regex extract (optional)" />
+          </div>
+          <div class="mapping-row">
+            <div class="mapping-target">Description</div>
+            <select data-map-source="description"></select>
+            <input data-map-regex="description" type="text" placeholder="Regex extract (optional)" />
+          </div>
+          <div class="mapping-row">
+            <div class="mapping-target">Quantity</div>
+            <select data-map-source="quantity"></select>
+            <input data-map-regex="quantity" type="text" placeholder="Regex extract (optional)" />
+          </div>
+          <div class="mapping-row">
+            <div class="mapping-target">Category</div>
+            <select data-map-source="category"></select>
+            <input data-map-regex="category" type="text" placeholder="Regex extract (optional)" />
+          </div>
+          <div class="mapping-row">
+            <div class="mapping-target">Subcategory / Material</div>
+            <select data-map-source="subcategory"></select>
+            <input data-map-regex="subcategory" type="text" placeholder="Regex extract (optional)" />
+          </div>
+          <div class="mapping-row">
+            <div class="mapping-target">Variant / Size</div>
+            <select data-map-source="variant"></select>
+            <input data-map-regex="variant" type="text" placeholder="Regex extract (optional)" />
+          </div>
+        </div>
+        <div class="mapping-scope">Use a source field plus an optional regex to extract only the portion you want. Example: `^([^,]+)` for the first comma-separated segment.</div>
       </div>
 
       <div class="label">Existing Match Strategy</div>
