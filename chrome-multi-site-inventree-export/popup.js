@@ -52,6 +52,8 @@ const els = {
   csvBtn: document.getElementById("csvBtn"),
   captureMeta: document.getElementById("captureMeta"),
   preview: document.getElementById("preview"),
+  mappedPreview: document.getElementById("mappedPreview"),
+  mappedPreviewMeta: document.getElementById("mappedPreviewMeta"),
   status: document.getElementById("status")
 };
 
@@ -90,16 +92,24 @@ function normalizeTemplateKey(value) {
 
 function getCurrentTemplateKey() {
   if (lastCapture?.source) {
-    return normalizeTemplateKey(lastCapture.source);
+    const source = normalizeTemplateKey(lastCapture.source);
+    const pageType = normalizeTemplateKey(lastCapture.pageType || "default");
+    return `${source}:${pageType}`;
   }
-  return normalizeTemplateKey(els.sourceMode?.value || "default");
+  return `${normalizeTemplateKey(els.sourceMode?.value || "default")}:default`;
 }
 
 function getCurrentTemplate() {
   const key = getCurrentTemplateKey();
+  const fallbackKey = `${normalizeTemplateKey(lastCapture?.source || els.sourceMode?.value || "default")}:default`;
+  const legacyKey = normalizeTemplateKey(lastCapture?.source || els.sourceMode?.value || "default");
   const template = storedMappingTemplates[key] && typeof storedMappingTemplates[key] === "object"
     ? storedMappingTemplates[key]
-    : {};
+    : storedMappingTemplates[fallbackKey] && typeof storedMappingTemplates[fallbackKey] === "object"
+      ? storedMappingTemplates[fallbackKey]
+      : storedMappingTemplates[legacyKey] && typeof storedMappingTemplates[legacyKey] === "object"
+        ? storedMappingTemplates[legacyKey]
+        : {};
   const output = {};
   for (const targetKey of MAPPING_TARGET_KEYS) {
     output[targetKey] = {
@@ -131,7 +141,7 @@ function renderMappingTemplateEditors() {
 
   if (els.mappingTemplateScope) {
     const sourceCount = Math.max(0, options.length - 3);
-    els.mappingTemplateScope.textContent = `Template scope: ${scopeLabel}. Captured source fields available: ${sourceCount}.`;
+    els.mappingTemplateScope.textContent = `Template scope: ${scopeLabel}. Captured source fields available: ${sourceCount}. Templates can vary by source and page type.`;
   }
 
   for (const select of mappingSourceInputs) {
@@ -375,6 +385,7 @@ async function saveSettings() {
     ? response.settings.mappingTemplates
     : storedMappingTemplates;
   renderMappingTemplateEditors();
+  await renderMappedPreview();
   setStatus("Settings saved.", "ok");
 }
 
@@ -382,11 +393,14 @@ function renderCapture(capture) {
   if (!capture || !Array.isArray(capture.rows)) {
     els.captureMeta.textContent = "No capture yet.";
     els.preview.innerHTML = "";
+    if (els.mappedPreview) els.mappedPreview.innerHTML = "";
+    if (els.mappedPreviewMeta) els.mappedPreviewMeta.textContent = "Capture a page to preview transformed fields.";
     return;
   }
 
   const lines = [
     `Source: ${capture.source || "-"}`,
+    `Page Type: ${capture.pageType || "-"}`,
     `Title: ${capture.pageTitle || "-"}`,
     `URL: ${capture.pageUrl || "-"}`,
     `Rows: ${capture.rows.length}`,
@@ -415,6 +429,49 @@ function renderCapture(capture) {
   els.preview.innerHTML = `<table><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table>`;
 }
 
+async function renderMappedPreview() {
+  if (!lastCapture?.rows?.length) {
+    if (els.mappedPreview) els.mappedPreview.innerHTML = "";
+    if (els.mappedPreviewMeta) els.mappedPreviewMeta.textContent = "Capture a page to preview transformed fields.";
+    return;
+  }
+
+  const response = await sendMessage({
+    type: "previewMappedItems",
+    capture: lastCapture,
+    settings: collectSettingsFromForm()
+  });
+
+  if (!response?.ok) {
+    if (els.mappedPreviewMeta) els.mappedPreviewMeta.textContent = response?.error || "Could not generate mapped preview.";
+    if (els.mappedPreview) els.mappedPreview.innerHTML = "";
+    return;
+  }
+
+  const items = Array.isArray(response.items) ? response.items : [];
+  if (els.mappedPreviewMeta) {
+    els.mappedPreviewMeta.textContent = `Template key: ${response.templateKey || getCurrentTemplateKey()}. Showing first ${items.length} transformed item(s).`;
+  }
+
+  if (items.length === 0) {
+    if (els.mappedPreview) els.mappedPreview.innerHTML = "<div style=\"padding:8px;\">No mapped items available.</div>";
+    return;
+  }
+
+  const columns = ["name", "description", "quantity", "category_text", "subcategory_text", "variant_text"];
+  const headerHtml = columns.map((h) => `<th>${escapeHtml(h)}</th>`).join("");
+  const bodyHtml = items
+    .map((item) => {
+      const cells = columns.map((column) => `<td>${escapeHtml(item?.[column] || "")}</td>`).join("");
+      return `<tr>${cells}</tr>`;
+    })
+    .join("");
+
+  if (els.mappedPreview) {
+    els.mappedPreview.innerHTML = `<table><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table>`;
+  }
+}
+
 function escapeHtml(value) {
   return String(value || "")
     .replace(/&/g, "&amp;")
@@ -439,6 +496,7 @@ async function capturePage() {
   lastCapture = response.capture;
   renderCapture(lastCapture);
   renderMappingTemplateEditors();
+  await renderMappedPreview();
   setStatus(`Captured ${lastCapture.rows.length} rows.`, "ok");
 }
 
@@ -608,6 +666,7 @@ async function loadState() {
   lastCapture = response.lastCapture || null;
   renderCapture(lastCapture);
   renderMappingTemplateEditors();
+  await renderMappedPreview();
 }
 
 function wireEvents() {
@@ -631,7 +690,20 @@ function wireEvents() {
 
   els.sourceMode.addEventListener("change", () => {
     renderMappingTemplateEditors();
+    renderMappedPreview().catch(() => {});
   });
+
+  for (const select of mappingSourceInputs) {
+    select.addEventListener("change", () => {
+      renderMappedPreview().catch(() => {});
+    });
+  }
+
+  for (const input of mappingRegexInputs) {
+    input.addEventListener("input", () => {
+      renderMappedPreview().catch(() => {});
+    });
+  }
 
   els.copyPluginExampleBtn.addEventListener("click", async () => {
     try {

@@ -396,6 +396,29 @@
       color: #32474f;
     }
 
+    .mapped-preview-wrap {
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fffef8;
+      padding: 8px;
+    }
+
+    .mapped-preview-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: #32474f;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .mapped-preview-meta {
+      font-size: 11px;
+      color: #4a595f;
+      margin-bottom: 6px;
+    }
+
     body.full-mode .mapping-row {
       grid-template-columns: 180px 1fr 1fr;
     }
@@ -571,6 +594,11 @@
     <div class="section">
       <div class="label">Preview (first 5 rows)</div>
       <div class="preview" id="preview"></div>
+      <div class="mapped-preview-wrap">
+        <div class="mapped-preview-title">Mapped Preview</div>
+        <div id="mappedPreviewMeta" class="mapped-preview-meta">Capture a page to preview transformed fields.</div>
+        <div class="preview" id="mappedPreview"></div>
+      </div>
     </div>
 
     <div class="section">

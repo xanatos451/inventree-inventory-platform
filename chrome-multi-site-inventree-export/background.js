@@ -122,6 +122,23 @@ async function handleMessage(message) {
       return { ok: true, filename };
     }
 
+    case "previewMappedItems": {
+      const capture = message?.capture;
+      if (!capture?.rows?.length) {
+        return { ok: false, error: "No rows available to preview." };
+      }
+
+      const incoming = sanitizeSettings(message?.settings || {});
+      const persisted = await getSettings();
+      const merged = { ...persisted, ...incoming };
+      const exportObj = buildExportObject(capture, merged);
+      return {
+        ok: true,
+        templateKey: getTemplateKey(capture, merged),
+        items: exportObj.items.slice(0, 8)
+      };
+    }
+
     case "sendToInventree": {
       const capture = message?.capture;
       if (!capture?.rows?.length) {
@@ -851,6 +868,7 @@ async function captureMcmasterTab(tab, settings, selectedChildLinks) {
 
   return {
     source: "mcmaster-carr",
+    pageType: primary.pageType || "category",
     capturedAt: new Date().toISOString(),
     pageTitle: primary.pageTitle,
     pageUrl: tab.url,
@@ -926,6 +944,7 @@ async function captureBoltDepotTab(tab, settings, selectedChildLinks) {
 
   return {
     source: "boltdepot",
+    pageType: primary.pageType || "catalog",
     capturedAt: new Date().toISOString(),
     pageTitle: primary.pageTitle,
     pageUrl: tab.url,
@@ -1001,6 +1020,7 @@ async function captureAmazonTab(tab, settings, selectedOrderItems) {
 
   return {
     source: "amazon",
+    pageType: primary.pageType || "order-items",
     capturedAt: new Date().toISOString(),
     pageTitle: primary.pageTitle,
     pageUrl: tab.url,
@@ -1085,6 +1105,7 @@ function scrapeAmazonOrderItems() {
   return {
     ok: items.length > 0,
     items,
+    pageType: /\/orders?/i.test(location.pathname) ? "order-items" : "order-items",
     pageTitle: normalizeText(
       document.querySelector("h1")?.textContent || document.title || "Amazon Orders"
     ),
@@ -1570,6 +1591,7 @@ function scrapeBoltDepotPageData() {
     const childRows = extractRowsFromChildLinks(childLinks, fallbackImage);
     return {
       ok: childRows.length > 0,
+      pageType: childRows.length > 0 ? "variant-list" : "catalog-empty",
       pageTitle: normalizeText(document.querySelector("h1")?.textContent || document.title || "Bolt Depot"),
       headers: childRows.length > 0
         ? ["Product", "Description", "ProductURL", "BoltDepotPartNumber", "RowImageURL", "SourcePageURL"]
@@ -1637,6 +1659,7 @@ function scrapeBoltDepotPageData() {
     if (fallbackRows.length > 0) {
       return {
         ok: true,
+        pageType: "order-details",
         pageTitle: normalizeText(document.querySelector("h1")?.textContent || document.title || "Bolt Depot"),
         headers: ["Product", "Description", "Quantity", "ProductURL", "BoltDepotPartNumber", "RowImageURL", "SourcePageURL"],
         rows: fallbackRows,
@@ -1650,6 +1673,7 @@ function scrapeBoltDepotPageData() {
     if (childRows.length > 1) {
       return {
         ok: true,
+        pageType: "variant-list",
         pageTitle: normalizeText(document.querySelector("h1")?.textContent || document.title || "Bolt Depot"),
         headers: ["Product", "Description", "ProductURL", "BoltDepotPartNumber", "RowImageURL", "SourcePageURL"],
         rows: childRows,
@@ -1660,6 +1684,7 @@ function scrapeBoltDepotPageData() {
 
   return {
     ok: true,
+    pageType: isOrderDetailsPage ? "order-details" : "catalog-table",
     pageTitle: normalizeText(document.querySelector("h1")?.textContent || document.title || "Bolt Depot"),
     headers: Array.from(new Set([...headers, "ProductURL", "BoltDepotPartNumber", "Quantity", "RowImageURL", "SourcePageURL"])),
     rows: dataRows,
@@ -1960,6 +1985,7 @@ function scrapeMcMasterCategoryData() {
 
     return {
       ok: true,
+      pageType: "category-link-list",
       headers: ["Product", "Description", "ProductURL", "McMasterPartNumber", "RowImageURL", "RowImageSource"],
       rows: fallbackRows,
       pageTitle: normalizeText(document.querySelector("h1")?.textContent || document.title || "McMaster Category"),
@@ -1971,6 +1997,7 @@ function scrapeMcMasterCategoryData() {
   const pageTitle = normalizeText(titleEl?.textContent || document.title || "McMaster Category");
   return {
     ok: true,
+    pageType: "category-table",
     headers: Array.from(new Set([...headers, "ProductURL", "McMasterPartNumber", "RowImageURL", "RowImageSource"])),
     rows,
     pageTitle,
@@ -1991,6 +2018,7 @@ function buildExportObject(capture, hints) {
   const items = capture.rows.map((row) => toInventreeItem(row, hints, capture));
   return {
     source: capture.source || "catalog",
+    page_type: capture.pageType || "default",
     captured_at: capture.capturedAt,
     page_title: capture.pageTitle,
     page_url: capture.pageUrl,
@@ -1999,6 +2027,17 @@ function buildExportObject(capture, hints) {
     item_count: items.length,
     items
   };
+}
+
+function getTemplateKey(capture, hints) {
+  const source = normalizeTemplateKey(capture?.source || hints?.sourceMode || "default");
+  const pageType = normalizeTemplateKey(capture?.pageType || "default");
+  return `${source}:${pageType}`;
+}
+
+function normalizeTemplateKey(value) {
+  const key = String(value || "default").trim().toLowerCase();
+  return key === "mcmaster-carr" ? "mcmaster" : key;
 }
 
 function toInventreeItem(row, hints, capture) {
@@ -2067,9 +2106,16 @@ function toInventreeItem(row, hints, capture) {
 
 function getMappingTemplateForCapture(capture, hints) {
   const templates = hints?.mappingTemplates && typeof hints.mappingTemplates === "object" ? hints.mappingTemplates : {};
-  const source = String(capture?.source || hints?.sourceMode || "default").toLowerCase();
-  const key = source === "mcmaster-carr" ? "mcmaster" : source;
-  const template = templates[key] && typeof templates[key] === "object" ? templates[key] : {};
+  const key = getTemplateKey(capture, hints);
+  const fallbackKey = `${normalizeTemplateKey(capture?.source || hints?.sourceMode || "default")}:default`;
+  const legacyKey = normalizeTemplateKey(capture?.source || hints?.sourceMode || "default");
+  const template = (templates[key] && typeof templates[key] === "object")
+    ? templates[key]
+    : (templates[fallbackKey] && typeof templates[fallbackKey] === "object")
+      ? templates[fallbackKey]
+      : (templates[legacyKey] && typeof templates[legacyKey] === "object")
+        ? templates[legacyKey]
+        : {};
   const normalized = {};
   for (const targetKey of MAPPING_TARGET_KEYS) {
     normalized[targetKey] = {
