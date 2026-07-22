@@ -47,6 +47,40 @@ async function openPopupPage() {
   return popupPage;
 }
 
+async function openDetailsById(popupPage, id) {
+  const details = popupPage.locator(`#${id}`);
+  if (await details.count()) {
+    const isOpen = await details.evaluate((node) => node.hasAttribute("open"));
+    if (!isOpen) {
+      await details.locator(":scope > summary").click();
+      await expect(details).toHaveAttribute("open", "");
+    }
+  }
+}
+
+async function openSettingsPanel(popupPage) {
+  await openDetailsById(popupPage, "settingsPanel");
+}
+
+async function openLinkedPagesPanel(popupPage) {
+  await openDetailsById(popupPage, "linkedPagesPanel");
+}
+
+async function openDirectDefaultsPanel(popupPage) {
+  await openSettingsPanel(popupPage);
+  await openDetailsById(popupPage, "directDefaultsPanel");
+}
+
+async function openConnectionPathsPanel(popupPage) {
+  await openSettingsPanel(popupPage);
+  await openDetailsById(popupPage, "connectionPathsPanel");
+}
+
+async function openHeaderMappingPanel(popupPage) {
+  await openSettingsPanel(popupPage);
+  await openDetailsById(popupPage, "headerMappingPanel");
+}
+
 test.beforeAll(async () => {
   const mockServer = await startMockInventreeServer();
   mockInventreeServer = mockServer.server;
@@ -106,6 +140,9 @@ test("supports larger full-view mode in a tab", async () => {
 
 test("saves and reloads settings from extension storage", async () => {
   const popupPage = await openPopupPage();
+  await openSettingsPanel(popupPage);
+  await openConnectionPathsPanel(popupPage);
+  await openLinkedPagesPanel(popupPage);
 
   await popupPage.fill("#inventreeUrl", "https://inventree.test");
   await popupPage.fill("#inventreeToken", "token-123");
@@ -114,9 +151,12 @@ test("saves and reloads settings from extension storage", async () => {
   await popupPage.fill("#maxLinkedPages", "7");
 
   await popupPage.click("#saveSettingsBtn");
-  await expect(popupPage.locator("#status")).toContainText("Settings saved.");
+  await expect(popupPage.locator("#status")).toContainText("Settings and templates saved.");
 
   await popupPage.reload();
+  await openSettingsPanel(popupPage);
+  await openConnectionPathsPanel(popupPage);
+  await openLinkedPagesPanel(popupPage);
 
   await expect(popupPage.locator("#inventreeUrl")).toHaveValue("https://inventree.test");
   await expect(popupPage.locator("#inventreeToken")).toHaveValue("token-123");
@@ -191,6 +231,7 @@ test("shows provider-specific error when source is forced to McMaster", async ()
 
 test("previews zero linked pages on non-supported site", async () => {
   const popupPage = await openPopupPage();
+  await openLinkedPagesPanel(popupPage);
 
   await popupPage.click("#previewLinksBtn");
   await expect(popupPage.locator("#status")).toContainText("Linked page preview loaded (0 found).");
@@ -212,6 +253,7 @@ test("opens help docs and shows quick start content", async () => {
 
 test("fetches existing categories and updates default category picker", async () => {
   const popupPage = await openPopupPage();
+  await openDirectDefaultsPanel(popupPage);
 
   await popupPage.fill("#inventreeUrl", mockInventreeBaseUrl);
   await popupPage.fill("#inventreeToken", "token-abc");
@@ -285,6 +327,8 @@ test("previews category assignment plan with existing and create steps", async (
   }, { mockInventreeBaseUrl });
 
   await popupPage.reload();
+  await openDirectDefaultsPanel(popupPage);
+  await openHeaderMappingPanel(popupPage);
   await popupPage.selectOption('select[data-map-source="name"]', "Name");
   await popupPage.selectOption('select[data-map-source="category"]', "Category");
   await popupPage.selectOption('select[data-map-source="subcategory"]', "Subcategory");
@@ -303,6 +347,7 @@ test("previews category assignment plan with existing and create steps", async (
 
 test("direct mode dry-run reports missing required settings", async () => {
   const popupPage = await openPopupPage();
+  await openDirectDefaultsPanel(popupPage);
 
   await popupPage.selectOption("#inventreeSyncMode", "direct");
   await popupPage.fill("#inventreeUrl", "");
