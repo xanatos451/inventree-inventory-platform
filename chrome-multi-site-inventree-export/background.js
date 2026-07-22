@@ -6,14 +6,20 @@ const DEFAULT_SETTINGS = {
   inventreePartApiPath: "/api/part/",
   inventreeSupplierPartApiPath: "/api/company/part/",
   inventreeStockItemApiPath: "/api/stock/",
+  inventreePartParameterApiPath: "/api/part/parameter/",
+  inventreeParameterTemplateApiPath: "/api/part/parameter/template/",
   inventreeDefaultCategoryId: "",
   enableCategoryBuilder: false,
   inventreeDefaultSupplierId: "",
   inventreeDefaultLocationId: "",
   stockQuantityHeaderHint: "",
   defaultStockQuantity: "",
+  mappingTemplatePathPattern: "",
   syncSupplierParts: true,
   syncStockRecords: false,
+  syncPartParameters: false,
+  autoCreateMissingParameterTemplates: false,
+  parameterMappingsText: "",
   sourceMode: "auto",
   crawlLinkedPages: true,
   maxLinkedPages: 20,
@@ -24,12 +30,15 @@ const DEFAULT_SETTINGS = {
   imageHeaderHint: "",
   includeImageUrls: false,
   uploadImagesIfSupported: false,
+  nameComposeFields: "",
+  nameComposeDelimiter: " - ",
+  globalImageSourceField: "",
   partImageUploadPath: "/api/part/{id}/upload/",
   partIdResponsePath: "",
   existingMatchStrategy: "skip"
 };
 
-const MAPPING_TARGET_KEYS = ["name", "description", "quantity", "category", "subcategory", "variant"];
+const MAPPING_TARGET_KEYS = ["name", "description", "quantity", "category", "subcategory", "variant", "notes"];
 
 const LAST_CAPTURE_KEY = "lastCapture";
 const LAST_SEND_RESPONSE_KEY = "lastSendResponse";
@@ -207,7 +216,7 @@ async function handleMessage(message) {
       const incoming = sanitizeSettings(message?.settings || {});
       const persisted = await getSettings();
       const merged = { ...persisted, ...incoming };
-      return await runDirectSyncDryRun(merged);
+      return await runDirectSyncDryRun(merged, message?.capture);
     }
 
     case "testPartIdPath": {
@@ -347,12 +356,15 @@ async function sendDirectToInventree(capture, settings) {
   const supplierId = parsePositiveInt(settings.inventreeDefaultSupplierId);
   const locationId = parsePositiveInt(settings.inventreeDefaultLocationId);
   const categoryCache = { list: null, byParent: new Map() };
+  const parameterTemplateCache = { list: null, byName: new Map() };
 
   let createdParts = 0;
   let updatedParts = 0;
   let failedParts = 0;
   let syncedSupplierParts = 0;
   let createdStockItems = 0;
+  let syncedPartParameters = 0;
+  let createdParameterTemplates = 0;
   let firstIssue = "";
 
   const imageItems = [];
@@ -389,6 +401,21 @@ async function sendDirectToInventree(capture, settings) {
           createdStockItems += 1;
         } else if (stockResult.error && !firstIssue) {
           firstIssue = stockResult.error;
+        }
+      }
+
+      if (settings.syncPartParameters) {
+        const parameterResult = await upsertPartParametersForDirectMode({
+          partId: result.partId,
+          categoryId: resolvedCategoryId,
+          item,
+          settings,
+          templateCache: parameterTemplateCache
+        });
+        syncedPartParameters += Number(parameterResult?.upserted || 0);
+        createdParameterTemplates += Number(parameterResult?.createdTemplates || 0);
+        if (parameterResult?.error && !firstIssue) {
+          firstIssue = parameterResult.error;
         }
       }
 
@@ -432,6 +459,8 @@ async function sendDirectToInventree(capture, settings) {
     failedParts,
     syncedSupplierParts,
     createdStockItems,
+    syncedPartParameters,
+    createdParameterTemplates,
     uploadedImages,
     skippedImages,
     imageUploadNote,
@@ -454,7 +483,283 @@ async function sendDirectToInventree(capture, settings) {
   };
 }
 
-async function runDirectSyncDryRun(settings) {
+function parseParameterMappingRules(rawText) {
+  const text = String(rawText || "");
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .map((line) => {
+      const idx = line.indexOf("=");
+      if (idx <= 0) return null;
+      const parameterName = line.slice(0, idx).trim();
+      const sourceField = line.slice(idx + 1).trim();
+      if (!parameterName || !sourceField) return null;
+      return { parameterName, sourceField };
+    })
+    .filter(Boolean);
+}
+
+function resolveItemSourceValue(item, sourceField) {
+  const key = String(sourceField || "").trim();
+  if (!key) return "";
+  if (Object.prototype.hasOwnProperty.call(item || {}, key)) {
+    return String(item?.[key] || "").trim();
+  }
+
+  const keyLc = key.toLowerCase();
+  for (const [itemKey, itemValue] of Object.entries(item || {})) {
+    if (String(itemKey || "").trim().toLowerCase() === keyLc) {
+      return String(itemValue || "").trim();
+    }
+  }
+
+  for (const [rawKey, rawValue] of Object.entries(item?.raw || {})) {
+    if (String(rawKey || "").trim().toLowerCase() === keyLc) {
+      return String(rawValue || "").trim();
+    }
+  }
+
+  return "";
+}
+
+async function ensureParameterTemplateCache(settings, cache) {
+  if (Array.isArray(cache.list)) {
+    return cache.list;
+  }
+
+  const templatePathResult = await resolveParameterTemplateApiPath(settings);
+  if (!templatePathResult.ok) {
+    throw new Error(templatePathResult.error || "Parameter template API path is not reachable.");
+  }
+  const templateApiPath = templatePathResult.path;
+
+  const all = [];
+  let nextUrl = new URL(`${templateApiPath}?limit=250`, settings.inventreeUrl).toString();
+  while (nextUrl) {
+    const response = await fetch(nextUrl, {
+      headers: {
+        Authorization: `Token ${settings.inventreeToken}`
+      }
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`Parameter template fetch failed (${response.status}): ${text.slice(0, 200)}`);
+    }
+
+    const payload = await response.json();
+    const rows = Array.isArray(payload) ? payload : Array.isArray(payload?.results) ? payload.results : [];
+    all.push(...rows);
+    nextUrl = typeof payload?.next === "string" && payload.next ? payload.next : "";
+  }
+
+  cache.list = all;
+  cache.byName = new Map();
+  for (const row of all) {
+    const name = String(row?.name || "").trim().toLowerCase();
+    if (!name) continue;
+    const list = cache.byName.get(name) || [];
+    list.push(row);
+    cache.byName.set(name, list);
+  }
+
+  return all;
+}
+
+function resolveTemplateIdForRule(cache, parameterName, categoryId) {
+  const nameKey = String(parameterName || "").trim().toLowerCase();
+  if (!nameKey) return null;
+
+  const candidates = cache.byName.get(nameKey) || [];
+  if (candidates.length === 0) return null;
+
+  const exactCategory = candidates.find((row) => parsePositiveInt(row?.part_category) === categoryId);
+  if (exactCategory) {
+    return parsePositiveInt(exactCategory?.pk ?? exactCategory?.id);
+  }
+
+  const globalCandidate = candidates.find((row) => !parsePositiveInt(row?.part_category));
+  if (globalCandidate) {
+    return parsePositiveInt(globalCandidate?.pk ?? globalCandidate?.id);
+  }
+
+  return parsePositiveInt(candidates[0]?.pk ?? candidates[0]?.id);
+}
+
+async function createParameterTemplateForRule(settings, cache, parameterName, categoryId) {
+  const templatePathResult = await resolveParameterTemplateApiPath(settings);
+  if (!templatePathResult.ok) {
+    return { ok: false, templateId: null, error: templatePathResult.error || "Parameter template API path is not reachable." };
+  }
+  const templateApiPath = templatePathResult.path;
+
+  const trimmedName = String(parameterName || "").trim();
+  if (!trimmedName) {
+    return { ok: false, templateId: null, error: "Parameter template name is empty." };
+  }
+
+  const attempts = [
+    { name: trimmedName, part_category: categoryId || undefined },
+    { name: trimmedName }
+  ];
+
+  let firstError = "";
+  for (const body of attempts) {
+    const response = await inventreeApiRequest(settings, "POST", templateApiPath, body);
+    if (!response.ok) {
+      const text = await response.text();
+      if (!firstError) {
+        firstError = `Parameter template create failed (${response.status}): ${text.slice(0, 180)}`;
+      }
+      continue;
+    }
+
+    const created = await response.json();
+    const templateId = parsePositiveInt(created?.pk ?? created?.id);
+    if (!templateId) {
+      if (!firstError) {
+        firstError = "Parameter template create succeeded but no template ID was returned.";
+      }
+      continue;
+    }
+
+    const row = {
+      ...created,
+      pk: templateId,
+      id: templateId,
+      name: created?.name || trimmedName,
+      part_category: created?.part_category ?? body.part_category ?? null
+    };
+
+    cache.list = Array.isArray(cache.list) ? cache.list : [];
+    cache.list.push(row);
+    const nameKey = String(row.name || "").trim().toLowerCase();
+    if (nameKey) {
+      const list = cache.byName.get(nameKey) || [];
+      list.push(row);
+      cache.byName.set(nameKey, list);
+    }
+
+    return { ok: true, templateId, created: true };
+  }
+
+  return {
+    ok: false,
+    templateId: null,
+    error: firstError || `Failed to create parameter template: ${trimmedName}`
+  };
+}
+
+async function upsertPartParametersForDirectMode({ partId, categoryId, item, settings, templateCache }) {
+  const rules = parseParameterMappingRules(settings.parameterMappingsText);
+  if (rules.length === 0) {
+    return { ok: true, upserted: 0 };
+  }
+
+  const partParameterPathResult = await resolvePartParameterApiPath(settings);
+  if (!partParameterPathResult.ok) {
+    return { ok: false, upserted: 0, createdTemplates: 0, error: partParameterPathResult.error || "Part parameter API path is not reachable." };
+  }
+  const partParameterApiPath = partParameterPathResult.path;
+
+  try {
+    await ensureParameterTemplateCache(settings, templateCache);
+  } catch (error) {
+    return { ok: false, upserted: 0, error: String(error?.message || error) };
+  }
+
+  let upserted = 0;
+  let createdTemplates = 0;
+  let firstError = "";
+
+  for (const rule of rules) {
+    const value = resolveItemSourceValue(item, rule.sourceField);
+    if (!value) continue;
+
+    let templateId = resolveTemplateIdForRule(templateCache, rule.parameterName, categoryId);
+    if (!templateId) {
+      if (settings.autoCreateMissingParameterTemplates) {
+        const createResult = await createParameterTemplateForRule(settings, templateCache, rule.parameterName, categoryId);
+        if (createResult.ok && createResult.templateId) {
+          templateId = createResult.templateId;
+          createdTemplates += 1;
+        } else if (!firstError) {
+          firstError = createResult.error || `Parameter template not found: ${rule.parameterName}`;
+        }
+      } else if (!firstError) {
+        firstError = `Parameter template not found: ${rule.parameterName}`;
+      }
+      if (!templateId) continue;
+    }
+
+    try {
+      const searchUrl = new URL(partParameterApiPath, settings.inventreeUrl);
+      searchUrl.searchParams.set("part", String(partId));
+      searchUrl.searchParams.set("template", String(templateId));
+
+      const lookup = await fetch(searchUrl.toString(), {
+        headers: {
+          Authorization: `Token ${settings.inventreeToken}`
+        }
+      });
+      if (!lookup.ok) {
+        const text = await lookup.text();
+        if (!firstError) {
+          firstError = `Parameter lookup failed (${lookup.status}): ${text.slice(0, 160)}`;
+        }
+        continue;
+      }
+
+      const lookupJson = await lookup.json();
+      const existingList = Array.isArray(lookupJson) ? lookupJson : Array.isArray(lookupJson?.results) ? lookupJson.results : [];
+      const existing = existingList[0] || null;
+
+      if (existing?.pk || existing?.id) {
+        const existingId = parsePositiveInt(existing.pk ?? existing.id);
+        if (existingId) {
+          const patch = await inventreeApiRequest(
+            settings,
+            "PATCH",
+            `${trimTrailingSlash(partParameterApiPath)}/${existingId}/`,
+            { data: String(value) }
+          );
+          if (patch.ok) {
+            upserted += 1;
+          } else if (!firstError) {
+            const text = await patch.text();
+            firstError = `Parameter update failed (${patch.status}): ${text.slice(0, 160)}`;
+          }
+          continue;
+        }
+      }
+
+      const create = await inventreeApiRequest(settings, "POST", partParameterApiPath, {
+        part: partId,
+        template: templateId,
+        data: String(value)
+      });
+      if (create.ok) {
+        upserted += 1;
+      } else if (!firstError) {
+        const text = await create.text();
+        firstError = `Parameter create failed (${create.status}): ${text.slice(0, 160)}`;
+      }
+    } catch (error) {
+      if (!firstError) {
+        firstError = String(error?.message || error);
+      }
+    }
+  }
+
+  return {
+    ok: !firstError,
+    upserted,
+    createdTemplates,
+    error: firstError
+  };
+}
+
+async function runDirectSyncDryRun(settings, capture) {
   const checks = [];
 
   if (settings.inventreeSyncMode !== "direct") {
@@ -501,6 +806,124 @@ async function runDirectSyncDryRun(settings) {
     });
   }
 
+  const parameterRules = parseParameterMappingRules(settings.parameterMappingsText);
+  if (settings.syncPartParameters) {
+    checks.push({
+      ok: parameterRules.length > 0,
+      label: "Part parameter mapping rules",
+      message: parameterRules.length > 0
+        ? `${parameterRules.length} rule(s) configured`
+        : "Add at least one mapping rule: Parameter Name = SourceField"
+    });
+    checks.push({
+      ok: true,
+      label: "Auto-create missing parameter templates",
+      message: settings.autoCreateMissingParameterTemplates
+        ? "Enabled"
+        : "Disabled (missing templates will be skipped)"
+    });
+  }
+
+  if (capture?.rows?.length) {
+    const exportObj = buildExportObject(capture, settings);
+    const items = Array.isArray(exportObj.items) ? exportObj.items : [];
+    const total = items.length;
+    const mappingTemplate = getMappingTemplateForCapture(capture, settings);
+    const countNonEmpty = (field) => items.filter((item) => String(item?.[field] || "").trim()).length;
+    const firstNonEmpty = (field) => {
+      for (const item of items) {
+        const value = String(item?.[field] || "").trim();
+        if (value) return value;
+      }
+      return "";
+    };
+    const sampleText = (value, maxLen = 140) => {
+      const oneLine = String(value || "").replace(/\s+/g, " ").trim();
+      if (!oneLine) return "[[empty]]";
+      return oneLine.length > maxLen
+        ? `[[${oneLine.slice(0, maxLen - 3)}...]]`
+        : `[[${oneLine}]]`;
+    };
+
+    checks.push({
+      ok: total > 0,
+      label: "Capture rows",
+      message: `${total} row(s) available for mapping preview`
+    });
+
+    const mappedFieldChecks = [
+      { targetKey: "name", itemField: "name", label: "Mapped name population" },
+      { targetKey: "variant", itemField: "variant_text", label: "Mapped variant_text population" },
+      { targetKey: "notes", itemField: "notes", label: "Mapped notes population" },
+      { targetKey: "category", itemField: "category_text", label: "Mapped category_text population" },
+      { targetKey: "subcategory", itemField: "subcategory_text", label: "Mapped subcategory_text population" }
+    ];
+
+    for (const fieldCheck of mappedFieldChecks) {
+      const configuredSource = String(mappingTemplate?.[fieldCheck.targetKey]?.sourceField || "").trim();
+      const populated = countNonEmpty(fieldCheck.itemField);
+      const isConfigured = Boolean(configuredSource);
+      checks.push({
+        ok: isConfigured ? populated > 0 : true,
+        label: fieldCheck.label,
+        message: `${populated}/${total} rows non-empty${isConfigured ? ` (source: ${configuredSource})` : " (auto/not explicitly mapped)"}`
+      });
+    }
+
+    const variantSample = firstNonEmpty("variant_text");
+    checks.push({
+      ok: Boolean(variantSample),
+      label: "Sample variant_text value",
+      message: sampleText(variantSample)
+    });
+
+    const categorySample = firstNonEmpty("category_text");
+    checks.push({
+      ok: Boolean(categorySample),
+      label: "Sample category_text value",
+      message: sampleText(categorySample)
+    });
+
+    const subcategorySample = firstNonEmpty("subcategory_text");
+    checks.push({
+      ok: Boolean(subcategorySample),
+      label: "Sample subcategory_text value",
+      message: sampleText(subcategorySample)
+    });
+
+    const chainPreviewRows = items
+      .map((item, index) => {
+        const chain = buildCategoryChainFromItem(item);
+        if (chain.length === 0) return "";
+        const itemName = String(item?.name || "").replace(/\s+/g, " ").trim();
+        const safeName = itemName ? itemName.slice(0, 42) : `Row ${index + 1}`;
+        return `${safeName}: [[${chain.join(" > ")}]]`;
+      })
+      .filter(Boolean)
+      .slice(0, 3);
+
+    checks.push({
+      ok: chainPreviewRows.length > 0,
+      label: "Sample merged category chains",
+      message: chainPreviewRows.length > 0
+        ? chainPreviewRows.join(" | ")
+        : "No category/subcategory chain values detected in mapped rows."
+    });
+
+    const notesSample = firstNonEmpty("notes");
+    checks.push({
+      ok: Boolean(notesSample),
+      label: "Sample notes value",
+      message: sampleText(notesSample, 220)
+    });
+  } else {
+    checks.push({
+      ok: true,
+      label: "Capture rows",
+      message: "No capture provided to dry-run. Run capture first to validate mapped field population."
+    });
+  }
+
   if (!settings.inventreeUrl || !settings.inventreeToken) {
     return { ok: true, checks };
   }
@@ -513,6 +936,10 @@ async function runDirectSyncDryRun(settings) {
   }
   if (settings.syncStockRecords && locationId) {
     probeTargets.push({ label: "Stock Item API path", path: settings.inventreeStockItemApiPath });
+  }
+  let shouldCheckParameterPaths = false;
+  if (settings.syncPartParameters && (parameterRules.length > 0 || settings.autoCreateMissingParameterTemplates)) {
+    shouldCheckParameterPaths = true;
   }
 
   for (const target of probeTargets) {
@@ -539,7 +966,127 @@ async function runDirectSyncDryRun(settings) {
     }
   }
 
+  if (shouldCheckParameterPaths) {
+    const partParameterPathResult = await resolvePartParameterApiPath(settings);
+    checks.push({
+      ok: partParameterPathResult.ok,
+      label: "Part Parameter API path",
+      message: partParameterPathResult.ok
+        ? `Reachable (auto-resolved to ${partParameterPathResult.path})`
+        : String(partParameterPathResult.error || "Could not resolve a reachable part parameter API path")
+    });
+
+    const templatePathResult = await resolveParameterTemplateApiPath(settings);
+    checks.push({
+      ok: templatePathResult.ok,
+      label: "Parameter Template API path",
+      message: templatePathResult.ok
+        ? `Reachable (auto-resolved to ${templatePathResult.path})`
+        : String(templatePathResult.error || "Could not resolve a reachable parameter template API path")
+    });
+  }
+
   return { ok: true, checks };
+}
+
+function toPathCandidate(path, fallbackPath) {
+  const raw = String(path || "").trim() || String(fallbackPath || "").trim();
+  if (!raw) return "";
+  return raw.startsWith("/") ? raw : `/${raw}`;
+}
+
+function uniquePathCandidates(paths) {
+  const seen = new Set();
+  const out = [];
+  for (const item of paths || []) {
+    const normalized = toPathCandidate(item, "");
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+async function resolveReachableApiPath(settings, cacheKey, fallbackPath, candidates) {
+  const key = String(cacheKey || "").trim();
+  if (!key) {
+    return { ok: false, path: toPathCandidate(fallbackPath, "/"), error: "Invalid API path cache key." };
+  }
+
+  settings.__resolvedApiPaths = settings.__resolvedApiPaths && typeof settings.__resolvedApiPaths === "object"
+    ? settings.__resolvedApiPaths
+    : {};
+
+  const cached = String(settings.__resolvedApiPaths[key] || "").trim();
+  if (cached) {
+    return { ok: true, path: cached, fromCache: true };
+  }
+
+  const pathCandidates = uniquePathCandidates([fallbackPath, ...(candidates || [])]);
+  let firstError = "";
+
+  for (const path of pathCandidates) {
+    try {
+      const endpoint = new URL(path, settings.inventreeUrl);
+      endpoint.searchParams.set("limit", "1");
+      const response = await fetch(endpoint.toString(), {
+        method: "GET",
+        headers: {
+          Authorization: `Token ${settings.inventreeToken}`
+        }
+      });
+
+      if (response.ok) {
+        settings.__resolvedApiPaths[key] = path;
+        return { ok: true, path, status: response.status };
+      }
+
+      if (!firstError) {
+        firstError = `${path} returned HTTP ${response.status}`;
+      }
+    } catch (error) {
+      if (!firstError) {
+        firstError = `${path} failed: ${String(error?.message || error)}`;
+      }
+    }
+  }
+
+  return {
+    ok: false,
+    path: toPathCandidate(fallbackPath, "/"),
+    error: firstError || "No reachable API path found."
+  };
+}
+
+async function resolvePartParameterApiPath(settings) {
+  return await resolveReachableApiPath(
+    settings,
+    "partParameter",
+    settings.inventreePartParameterApiPath,
+    [
+      settings.inventreePartParameterApiPath,
+      "/api/part/parameter/",
+      "/api/part/parameters/",
+      "/api/part/partparameter/",
+      "/api/part/part-parameter/"
+    ]
+  );
+}
+
+async function resolveParameterTemplateApiPath(settings) {
+  return await resolveReachableApiPath(
+    settings,
+    "parameterTemplate",
+    settings.inventreeParameterTemplateApiPath,
+    [
+      settings.inventreeParameterTemplateApiPath,
+      "/api/part/parameter/template/",
+      "/api/part/parametertemplate/",
+      "/api/part/parameter-template/",
+      "/api/part/partparametertemplate/",
+      "/api/part/part-parameter-template/"
+    ]
+  );
 }
 
 async function createOrUpdatePartInDirectMode(item, settings, categoryId) {
@@ -549,6 +1096,7 @@ async function createOrUpdatePartInDirectMode(item, settings, categoryId) {
   const partBody = {
     name: String(item.name || "").trim() || "Imported Product",
     description: String(item.description || "").trim(),
+    notes: String(item.notes || "").trim(),
     category: categoryId,
     IPN: ipn
   };
@@ -557,6 +1105,7 @@ async function createOrUpdatePartInDirectMode(item, settings, categoryId) {
     const patchBody = {
       name: partBody.name,
       description: partBody.description,
+      notes: partBody.notes,
       IPN: partBody.IPN
     };
     const response = await inventreeApiRequest(settings, "PATCH", `${trimTrailingSlash(settings.inventreePartApiPath)}/${existingPartId}/`, patchBody);
@@ -582,21 +1131,56 @@ async function createOrUpdatePartInDirectMode(item, settings, categoryId) {
   return { ok: true, action: "create", partId };
 }
 
+function splitCategorySegments(rawText) {
+  const text = String(rawText || "").trim();
+  if (!text) return [];
+  return text
+    // Support common breadcrumb delimiters while avoiding raw fractions like 18/8.
+    .split(/\s*(?:>|»|->|\|)\s*|\s+\/\s+/)
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+}
+
+function buildCategoryChainFromItem(item) {
+  const categorySegments = splitCategorySegments(item?.category_text);
+  const subcategorySegments = splitCategorySegments(item?.subcategory_text);
+
+  const chain = [...categorySegments];
+  if (subcategorySegments.length > 0) {
+    let overlap = 0;
+    const limit = Math.min(chain.length, subcategorySegments.length);
+    while (overlap < limit) {
+      if (chain[overlap].toLowerCase() !== subcategorySegments[overlap].toLowerCase()) {
+        break;
+      }
+      overlap += 1;
+    }
+    chain.push(...subcategorySegments.slice(overlap));
+  }
+
+  const normalized = [];
+  for (const segment of chain) {
+    const current = String(segment || "").trim();
+    if (!current) continue;
+    const prev = normalized[normalized.length - 1];
+    if (prev && prev.toLowerCase() === current.toLowerCase()) continue;
+    normalized.push(current);
+  }
+
+  return normalized;
+}
+
 async function resolveDirectCategoryIdForItem(item, settings, defaultCategoryId, categoryCache) {
   if (!settings.enableCategoryBuilder) {
     return defaultCategoryId;
   }
 
-  const categoryText = String(item.category_text || "").trim();
-  const subcategoryText = String(item.subcategory_text || "").trim();
-  if (!categoryText && !subcategoryText) {
+  const chain = buildCategoryChainFromItem(item);
+  if (chain.length === 0) {
     return defaultCategoryId;
   }
 
   let currentParentId = defaultCategoryId;
-  const chain = [];
-  if (categoryText) chain.push(categoryText);
-  if (subcategoryText && subcategoryText.toLowerCase() !== categoryText.toLowerCase()) chain.push(subcategoryText);
 
   for (const name of chain) {
     const resolved = await resolveOrCreateCategoryByName(settings, currentParentId, name, categoryCache);
@@ -738,11 +1322,7 @@ async function previewCategoryAssignments(capture, settings, defaultCategoryId) 
 
     const categoryText = String(item?.category_text || "").trim();
     const subcategoryText = String(item?.subcategory_text || "").trim();
-    const chain = [];
-    if (categoryText) chain.push(categoryText);
-    if (subcategoryText && subcategoryText.toLowerCase() !== categoryText.toLowerCase()) {
-      chain.push(subcategoryText);
-    }
+    const chain = buildCategoryChainFromItem(item);
 
     for (const segmentName of chain) {
       const siblings = byParent.get(String(currentParentId)) || [];
@@ -947,15 +1527,21 @@ function sanitizeSettings(input) {
     inventreePartApiPath: normalizePath(input.inventreePartApiPath, "/api/part/"),
     inventreeSupplierPartApiPath: normalizePath(input.inventreeSupplierPartApiPath, "/api/company/part/"),
     inventreeStockItemApiPath: normalizePath(input.inventreeStockItemApiPath, "/api/stock/"),
+    inventreePartParameterApiPath: normalizePath(input.inventreePartParameterApiPath, "/api/part/parameter/"),
+    inventreeParameterTemplateApiPath: normalizePath(input.inventreeParameterTemplateApiPath, "/api/part/parameter/template/"),
     inventreeDefaultCategoryId: String(input.inventreeDefaultCategoryId || "").trim(),
     enableCategoryBuilder: Boolean(input.enableCategoryBuilder),
     inventreeDefaultSupplierId: String(input.inventreeDefaultSupplierId || "").trim(),
     inventreeDefaultLocationId: String(input.inventreeDefaultLocationId || "").trim(),
     stockQuantityHeaderHint: String(input.stockQuantityHeaderHint || "").trim(),
     defaultStockQuantity: String(input.defaultStockQuantity || "").trim(),
+    mappingTemplatePathPattern: String(input.mappingTemplatePathPattern || "").trim(),
     mappingTemplates: sanitizeMappingTemplates(input.mappingTemplates),
     syncSupplierParts: input.syncSupplierParts !== false,
     syncStockRecords: Boolean(input.syncStockRecords),
+    syncPartParameters: Boolean(input.syncPartParameters),
+    autoCreateMissingParameterTemplates: Boolean(input.autoCreateMissingParameterTemplates),
+    parameterMappingsText: String(input.parameterMappingsText || ""),
     sourceMode: sourceModeSafe,
     crawlLinkedPages: Boolean(input.crawlLinkedPages),
     maxLinkedPages: Math.min(80, Math.max(1, Number(input.maxLinkedPages || 20))),
@@ -966,6 +1552,9 @@ function sanitizeSettings(input) {
     imageHeaderHint: String(input.imageHeaderHint || "").trim(),
     includeImageUrls: Boolean(input.includeImageUrls),
     uploadImagesIfSupported: Boolean(input.uploadImagesIfSupported),
+    nameComposeFields: String(input.nameComposeFields || "").trim(),
+    nameComposeDelimiter: String(input.nameComposeDelimiter || " - "),
+    globalImageSourceField: String(input.globalImageSourceField || "").trim(),
     partImageUploadPath: normalizePath(input.partImageUploadPath, "/api/part/{id}/upload/"),
     partIdResponsePath: String(input.partIdResponsePath || "").trim(),
     existingMatchStrategy: input.existingMatchStrategy === "update" ? "update" : "skip"
@@ -985,6 +1574,14 @@ function sanitizeMappingTemplates(input) {
       template[targetKey] = {
         sourceField: String(source || "").trim(),
         regex: String(regex || "").trim()
+      };
+    }
+    const createdAt = String(value?._meta?.createdAt || "").trim();
+    const lastUsedAt = String(value?._meta?.lastUsedAt || "").trim();
+    if (createdAt || lastUsedAt) {
+      template._meta = {
+        ...(createdAt ? { createdAt } : {}),
+        ...(lastUsedAt ? { lastUsedAt } : {})
       };
     }
     cleaned[String(key).trim() || "default"] = template;
@@ -1095,6 +1692,51 @@ async function captureMcmasterTab(tab, settings, selectedChildLinks) {
   const headerSet = new Set(Array.isArray(primary.headers) ? primary.headers : []);
   let pagesScraped = 1;
 
+  function mergeRowWithDetail(baseRow, detailRow) {
+    const merged = { ...baseRow };
+    for (const [key, value] of Object.entries(detailRow || {})) {
+      const text = String(value ?? "").trim();
+      if (!text) continue;
+      merged[key] = value;
+    }
+    return merged;
+  }
+
+  function mergeMcmasterRowsWithDetails(baseRows, detailRows) {
+    const byUrl = new Map();
+    const byPart = new Map();
+    const usedDetails = new Set();
+
+    for (const detail of detailRows || []) {
+      const detailUrl = String(detail?.ProductURL || "").trim().toLowerCase();
+      const detailPart = String(detail?.McMasterPartNumber || "").trim().toLowerCase();
+      if (detailUrl) byUrl.set(detailUrl, detail);
+      if (detailPart) byPart.set(detailPart, detail);
+    }
+
+    const merged = [];
+    for (const row of baseRows || []) {
+      const rowUrl = String(row?.ProductURL || "").trim().toLowerCase();
+      const rowPart = String(row?.McMasterPartNumber || "").trim().toLowerCase();
+      const detail = (rowUrl && byUrl.get(rowUrl)) || (rowPart && byPart.get(rowPart)) || null;
+      if (!detail) {
+        merged.push(row);
+        continue;
+      }
+
+      usedDetails.add(detail);
+      merged.push(mergeRowWithDetail(row, detail));
+    }
+
+    for (const detail of detailRows || []) {
+      if (!usedDetails.has(detail)) {
+        merged.push(detail);
+      }
+    }
+
+    return merged;
+  }
+
   const links = Array.isArray(primary.childLinks) ? primary.childLinks : [];
   const shouldCrawl = Boolean(settings.crawlLinkedPages);
   const maxLinks = Math.min(80, Math.max(1, Number(settings.maxLinkedPages || 20)));
@@ -1108,11 +1750,23 @@ async function captureMcmasterTab(tab, settings, selectedChildLinks) {
     crawlTargets = crawlTargets.filter((url) => selectedSet.has(url));
   }
 
+  const detailRows = [];
   if (shouldCrawl && crawlTargets.length > 0) {
     for (const url of crawlTargets) {
       const childTab = await chrome.tabs.create({ url, active: false });
       try {
         await waitForTabLoaded(childTab.id, 30000);
+
+        const detail = await executeScraperOnTab(childTab.id, scrapeMcMasterProductDetailData);
+        if (detail?.ok && detail.row) {
+          detailRows.push(detail.row);
+          for (const header of detail.headers || []) {
+            headerSet.add(header);
+          }
+          pagesScraped += 1;
+          continue;
+        }
+
         const child = await executeScraperOnTab(childTab.id, scrapeMcMasterCategoryData);
         if (!child?.ok || !Array.isArray(child.rows)) {
           continue;
@@ -1138,6 +1792,12 @@ async function captureMcmasterTab(tab, settings, selectedChildLinks) {
     }
   }
 
+  if (detailRows.length > 0) {
+    const mergedWithDetails = mergeMcmasterRowsWithDetails(allRows, detailRows);
+    allRows.length = 0;
+    allRows.push(...mergedWithDetails);
+  }
+
   const dedupedRows = dedupeRows(allRows);
   if (dedupedRows.length === 0) {
     throw new Error("No product rows found on this McMaster page or linked child pages.");
@@ -1148,6 +1808,12 @@ async function captureMcmasterTab(tab, settings, selectedChildLinks) {
     pageType: primary.pageType || "category",
     capturedAt: new Date().toISOString(),
     pageTitle: primary.pageTitle,
+    pageBreadcrumbs: primary.pageBreadcrumbs || "",
+    pageSectionSummary: primary.pageSectionSummary || "",
+    leftFiltersSummary: primary.leftFiltersSummary || "",
+    pagePrimaryImageUrl: primary.pagePrimaryImageUrl || "",
+    sidebarPrimaryImageUrl: primary.sidebarPrimaryImageUrl || "",
+    selectedPageImageUrl: primary.selectedPageImageUrl || "",
     pageUrl: tab.url,
     headers: Array.from(headerSet),
     rows: dedupedRows,
@@ -2033,6 +2699,97 @@ function scrapeMcMasterCategoryData() {
     return candidates.map((item) => item.src);
   }
 
+  function parseBreadcrumbs() {
+    const breadcrumbRoot = document.querySelector("nav[aria-label*='breadcrumb' i], [aria-label*='breadcrumb' i], .breadcrumb, #breadcrumb, #breadcrumbs");
+    if (breadcrumbRoot) {
+      const links = Array.from(breadcrumbRoot.querySelectorAll("a, span, li"))
+        .map((node) => normalizeText(node.textContent))
+        .filter(Boolean);
+      if (links.length > 1) {
+        return links.join(" > ");
+      }
+      const inlineText = normalizeText(breadcrumbRoot.textContent);
+      if (inlineText.includes(">")) {
+        return inlineText;
+      }
+    }
+
+    const main = document.querySelector("main, [role='main'], #main, #maincontent, #content") || document.body;
+    const candidates = Array.from(main.querySelectorAll("div, p, span"))
+      .slice(0, 200)
+      .map((node) => normalizeText(node.textContent))
+      .filter((text) => text && text.includes(">") && text.length < 240);
+    return candidates[0] || "";
+  }
+
+  function collectLeftFiltersSummary() {
+    const leftRoot = document.querySelector("aside, #leftNav, #leftColumn, .leftNav, .sidebar, [class*='filter'], [id*='filter']");
+    if (!leftRoot) return "";
+
+    const selected = [];
+    const seen = new Set();
+    for (const node of Array.from(leftRoot.querySelectorAll("li, a, span, label, div"))) {
+      const text = normalizeText(node.textContent);
+      if (!text || text.length > 80) continue;
+      const selectedSignal =
+        /^[\u2713\u2714\u2715\u2022]/.test(text) ||
+        node.classList.contains("selected") ||
+        node.classList.contains("active") ||
+        Boolean(node.querySelector("input[type='checkbox']:checked, input[type='radio']:checked"));
+      if (!selectedSignal) continue;
+
+      const cleaned = text.replace(/^[\u2713\u2714\u2715\u2022]\s*/, "").trim();
+      if (!cleaned || seen.has(cleaned.toLowerCase())) continue;
+      seen.add(cleaned.toLowerCase());
+      selected.push(cleaned);
+      if (selected.length >= 12) break;
+    }
+    return selected.join(" | ");
+  }
+
+  function collectPageContext(table, sectionImageCandidates) {
+    const title = normalizeText(document.querySelector("h1")?.textContent || document.title || "McMaster Category");
+    const breadcrumbs = parseBreadcrumbs();
+
+    const mainRoot = document.querySelector("main, [role='main'], #main, #maincontent, #content") || document.body;
+    const titleEl = document.querySelector("h1");
+    const summaryParts = [];
+    if (titleEl) {
+      let sibling = titleEl.nextElementSibling;
+      let depth = 0;
+      while (sibling && depth < 6) {
+        const text = normalizeText(sibling.textContent);
+        if (text && text.length > 20 && text.length < 320) {
+          summaryParts.push(text);
+        }
+        if (summaryParts.length >= 2) break;
+        sibling = sibling.nextElementSibling;
+        depth += 1;
+      }
+    }
+    if (summaryParts.length === 0) {
+      const firstParagraphs = Array.from(mainRoot.querySelectorAll("p"))
+        .map((node) => normalizeText(node.textContent))
+        .filter((text) => text && text.length > 20)
+        .slice(0, 2);
+      summaryParts.push(...firstParagraphs);
+    }
+
+    const leftRoot = document.querySelector("aside, #leftNav, #leftColumn, .leftNav, .sidebar, [class*='filter'], [id*='filter']");
+    const sidebarPrimaryImageUrl = firstImageSrc(leftRoot || document.createElement("div"));
+    const pagePrimaryImageUrl = sectionImageCandidates[0] || firstImageSrc(mainRoot) || "";
+
+    return {
+      pageTitle: title,
+      pageBreadcrumbs: breadcrumbs,
+      pageSectionSummary: summaryParts.join(" "),
+      leftFiltersSummary: collectLeftFiltersSummary(),
+      pagePrimaryImageUrl,
+      sidebarPrimaryImageUrl,
+      selectedPageImageUrl: pagePrimaryImageUrl || sidebarPrimaryImageUrl || ""
+    };
+  }
+
   function isPartNumber(value) {
     const text = String(value || "");
     return /\b\d{5}[A-Z]\d{3,4}\b/i.test(text);
@@ -2104,10 +2861,11 @@ function scrapeMcMasterCategoryData() {
     return match ? match[0].toUpperCase() : "";
   }
 
-  function extractRowsFromProductLinks(sectionImageCandidates) {
+  function extractRowsFromProductLinks(sectionImageCandidates, pageContext) {
     const out = [];
     const seen = new Set();
-    const anchors = Array.from(document.querySelectorAll("a[href]"));
+    const primaryRoot = document.querySelector("main, [role='main'], #main, #maincontent, #content") || document.body;
+    const anchors = Array.from(primaryRoot.querySelectorAll("a[href]"));
 
     for (const anchor of anchors) {
       let href = "";
@@ -2121,10 +2879,11 @@ function scrapeMcMasterCategoryData() {
       const linkText = normalizeText(anchor.textContent || "");
       const partNumber = extractPartNumber(linkText, href);
       const isProductPath = /\/\d{5}[A-Z]\d{3,4}\b/i.test(href) || /\/products\//i.test(href);
-      if (!partNumber && !isProductPath) continue;
-
       const container = anchor.closest("tr, li, article, section, div") || anchor.parentElement || anchor;
       const containerText = normalizeText(container?.textContent || "");
+      const hasPartSignalNearby = isPartNumber(containerText) || /\b\d{5}[A-Z]\d{3,4}\b/i.test(href);
+      if (!partNumber && (!isProductPath || !hasPartSignalNearby)) continue;
+
       const description = containerText.length > 500 ? containerText.slice(0, 500) : containerText;
       const name = linkText || (partNumber ? `Part ${partNumber}` : "Product");
       const rowImageUrl = firstImageSrc(container) || sectionImageCandidates[0] || "";
@@ -2139,7 +2898,14 @@ function scrapeMcMasterCategoryData() {
         ProductURL: href,
         McMasterPartNumber: partNumber,
         RowImageURL: rowImageUrl,
-        RowImageSource: rowImageUrl && rowImageUrl === sectionImageCandidates[0] ? "section-fallback" : (rowImageUrl ? "row" : "none")
+        RowImageSource: rowImageUrl && rowImageUrl === sectionImageCandidates[0] ? "section-fallback" : (rowImageUrl ? "row" : "none"),
+        PageBreadcrumbs: pageContext.pageBreadcrumbs,
+        PageTitle: pageContext.pageTitle,
+        PageSectionSummary: pageContext.pageSectionSummary,
+        LeftFiltersSummary: pageContext.leftFiltersSummary,
+        PagePrimaryImageURL: pageContext.pagePrimaryImageUrl,
+        SidebarPrimaryImageURL: pageContext.sidebarPrimaryImageUrl,
+        SelectedPageImageURL: pageContext.selectedPageImageUrl
       });
     }
 
@@ -2154,16 +2920,40 @@ function scrapeMcMasterCategoryData() {
   }
 
   function scoreTable(table) {
+    const badContainer = table.closest("nav, header, footer, aside, [role='navigation'], [class*='nav'], [id*='nav'], [class*='menu'], [id*='menu'], [class*='sidebar'], [id*='sidebar'], [class*='breadcrumb'], [id*='breadcrumb']");
+    if (badContainer) {
+      return -10000;
+    }
+
+    const inMainContent = Boolean(table.closest("main, [role='main'], #main, #maincontent, #content, .content, .main, .page-content, .product-results"));
+    const inResultsContainer = Boolean(table.closest("[class*='result'], [id*='result'], [class*='product'], [id*='product']"));
+
     const rows = getBodyRows(table);
     const rowCount = rows.length;
     const colCount = Math.max(...rows.map((row) => row.querySelectorAll("td,th").length), 0);
+    const dataRowCount = rows.filter((row) => {
+      const cells = Array.from(row.querySelectorAll("td,th"));
+      const nonEmpty = cells.filter((cell) => normalizeText(cell.textContent)).length;
+      return nonEmpty >= 3;
+    }).length;
     const partLinks = table.querySelectorAll("a[href*='/products/'], a[href*='mcmaster.com']").length;
     const headText = normalizeText(table.textContent || "").toLowerCase();
-    const hasPartLikeHeader = /part\s*number|stock\s*number|mcmaster/i.test(headText) ? 4 : 0;
-    return rowCount * colCount + hasPartLikeHeader + (partLinks * 5);
+    const hasPartLikeHeader = /part\s*number|stock\s*number|mcmaster|material|thread|length|diameter/i.test(headText) ? 8 : 0;
+
+    return (
+      rowCount * colCount +
+      (dataRowCount * 8) +
+      hasPartLikeHeader +
+      (partLinks * 5) +
+      (inMainContent ? 120 : 0) +
+      (inResultsContainer ? 35 : 0)
+    );
   }
 
-  const tables = Array.from(document.querySelectorAll("table"));
+  const primaryRoots = Array.from(document.querySelectorAll("main, [role='main'], #main, #maincontent, #content, .content, .main, .page-content, .product-results"));
+  const preferredTables = Array.from(new Set(primaryRoots.flatMap((root) => Array.from(root.querySelectorAll("table")))));
+  const allTables = Array.from(document.querySelectorAll("table"));
+  const tables = preferredTables.length > 0 ? preferredTables : allTables;
   const childLinks = discoverChildLinks();
   if (tables.length === 0) {
     return { ok: false, error: "No HTML tables found on page.", childLinks };
@@ -2185,6 +2975,7 @@ function scrapeMcMasterCategoryData() {
   }
 
   const sectionImageCandidates = buildSectionImageCandidates(bestTable);
+  const pageContext = collectPageContext(bestTable, sectionImageCandidates);
 
   const rows = [];
   const tableRows = getBodyRows(bestTable);
@@ -2251,11 +3042,18 @@ function scrapeMcMasterCategoryData() {
     obj.McMasterPartNumber = partNumber;
     obj.RowImageURL = rowImageUrl;
     obj.RowImageSource = rowImageUrl && rowImageUrl === sectionImageCandidates[0] ? "section-fallback" : (rowImageUrl ? "row" : "none");
+    obj.PageBreadcrumbs = pageContext.pageBreadcrumbs;
+    obj.PageTitle = pageContext.pageTitle;
+    obj.PageSectionSummary = pageContext.pageSectionSummary;
+    obj.LeftFiltersSummary = pageContext.leftFiltersSummary;
+    obj.PagePrimaryImageURL = pageContext.pagePrimaryImageUrl;
+    obj.SidebarPrimaryImageURL = pageContext.sidebarPrimaryImageUrl;
+    obj.SelectedPageImageURL = pageContext.selectedPageImageUrl;
     rows.push(obj);
   }
 
   if (rows.length === 0) {
-    const fallbackRows = extractRowsFromProductLinks(sectionImageCandidates);
+    const fallbackRows = extractRowsFromProductLinks(sectionImageCandidates, pageContext);
     if (fallbackRows.length === 0) {
       return { ok: false, error: "No product rows found in selected table." };
     }
@@ -2263,22 +3061,185 @@ function scrapeMcMasterCategoryData() {
     return {
       ok: true,
       pageType: "category-link-list",
-      headers: ["Product", "Description", "ProductURL", "McMasterPartNumber", "RowImageURL", "RowImageSource"],
+      headers: [
+        "Product",
+        "Description",
+        "ProductURL",
+        "McMasterPartNumber",
+        "RowImageURL",
+        "RowImageSource",
+        "PageBreadcrumbs",
+        "PageTitle",
+        "PageSectionSummary",
+        "LeftFiltersSummary",
+        "PagePrimaryImageURL",
+        "SidebarPrimaryImageURL",
+        "SelectedPageImageURL"
+      ],
       rows: fallbackRows,
-      pageTitle: normalizeText(document.querySelector("h1")?.textContent || document.title || "McMaster Category"),
+      pageTitle: pageContext.pageTitle,
+      pageBreadcrumbs: pageContext.pageBreadcrumbs,
+      pageSectionSummary: pageContext.pageSectionSummary,
+      leftFiltersSummary: pageContext.leftFiltersSummary,
+      pagePrimaryImageUrl: pageContext.pagePrimaryImageUrl,
+      sidebarPrimaryImageUrl: pageContext.sidebarPrimaryImageUrl,
+      selectedPageImageUrl: pageContext.selectedPageImageUrl,
       childLinks
     };
   }
 
-  const titleEl = document.querySelector("h1");
-  const pageTitle = normalizeText(titleEl?.textContent || document.title || "McMaster Category");
   return {
     ok: true,
     pageType: "category-table",
-    headers: Array.from(new Set([...headers, "ProductURL", "McMasterPartNumber", "RowImageURL", "RowImageSource"])),
+    headers: Array.from(new Set([
+      ...headers,
+      "ProductURL",
+      "McMasterPartNumber",
+      "RowImageURL",
+      "RowImageSource",
+      "PageBreadcrumbs",
+      "PageTitle",
+      "PageSectionSummary",
+      "LeftFiltersSummary",
+      "PagePrimaryImageURL",
+      "SidebarPrimaryImageURL",
+      "SelectedPageImageURL"
+    ])),
     rows,
-    pageTitle,
+    pageTitle: pageContext.pageTitle,
+    pageBreadcrumbs: pageContext.pageBreadcrumbs,
+    pageSectionSummary: pageContext.pageSectionSummary,
+    leftFiltersSummary: pageContext.leftFiltersSummary,
+    pagePrimaryImageUrl: pageContext.pagePrimaryImageUrl,
+    sidebarPrimaryImageUrl: pageContext.sidebarPrimaryImageUrl,
+    selectedPageImageUrl: pageContext.selectedPageImageUrl,
     childLinks
+  };
+}
+
+function scrapeMcMasterProductDetailData() {
+  function normalizeText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function toAbsolute(raw) {
+    try {
+      return new URL(raw, location.href).toString();
+    } catch {
+      return "";
+    }
+  }
+
+  function firstImageSrc(container) {
+    const image = container?.querySelector("img[src], img[data-src], img[data-original], source[srcset]");
+    if (!image) return "";
+
+    const srcset = image.getAttribute("srcset") || "";
+    if (srcset) {
+      const first = srcset.split(",")[0]?.trim().split(" ")[0] || "";
+      if (first) return toAbsolute(first) || first;
+    }
+
+    return toAbsolute(image.getAttribute("src") || image.getAttribute("data-src") || image.getAttribute("data-original") || "");
+  }
+
+  function parseBreadcrumbs() {
+    const root = document.querySelector("nav[aria-label*='breadcrumb' i], [aria-label*='breadcrumb' i], .breadcrumb, #breadcrumb, #breadcrumbs");
+    if (!root) return "";
+    return Array.from(root.querySelectorAll("a, span, li"))
+      .map((node) => normalizeText(node.textContent))
+      .filter(Boolean)
+      .join(" > ");
+  }
+
+  function extractPartNumber(titleText) {
+    const fromUrl = String(location.href || "").match(/\b\d{5}[A-Z]\d{3,4}\b/i);
+    if (fromUrl) return fromUrl[0].toUpperCase();
+
+    const fullText = `${titleText || ""} ${normalizeText(document.body?.textContent || "")}`;
+    const fromBody = fullText.match(/\b\d{5}[A-Z]\d{3,4}\b/i);
+    return fromBody ? fromBody[0].toUpperCase() : "";
+  }
+
+  const title = normalizeText(document.querySelector("h1")?.textContent || document.title || "");
+  const breadcrumbs = parseBreadcrumbs();
+  const partNumber = extractPartNumber(title);
+
+  const specMap = {};
+  const specLines = [];
+  const specRows = Array.from(document.querySelectorAll("table tr"));
+  for (const row of specRows) {
+    const th = normalizeText(row.querySelector("th")?.textContent || "");
+    const tds = Array.from(row.querySelectorAll("td")).map((cell) => normalizeText(cell.textContent));
+    if (th && tds.length > 0) {
+      const value = tds.filter(Boolean).join(" ");
+      if (value) {
+        specMap[th] = value;
+        specLines.push(`${th}: ${value}`);
+      }
+      continue;
+    }
+
+    if (tds.length >= 2) {
+      const key = tds[0];
+      const value = tds.slice(1).filter(Boolean).join(" ");
+      if (key && value) {
+        specMap[key] = value;
+        specLines.push(`${key}: ${value}`);
+      }
+    }
+  }
+
+  const featureBullets = Array.from(document.querySelectorAll("main li, [role='main'] li"))
+    .map((node) => normalizeText(node.textContent))
+    .filter((text) => text && text.length > 8)
+    .slice(0, 15);
+
+  const specText = specLines.slice(0, 80).join("\n");
+  const bulletText = featureBullets.slice(0, 20).join("\n");
+  const detailNotes = [specText, bulletText]
+    .filter(Boolean)
+    .join("\n\n")
+    .slice(0, 16000);
+
+  const threadSize = Object.entries(specMap).find(([key]) => /thread\s*size/i.test(key))?.[1] || "";
+  const lengthValue = Object.entries(specMap).find(([key]) => /(?:^|\b)(?:length|lg\.?)(?:\b|$)/i.test(key))?.[1] || "";
+  const variant = threadSize && lengthValue
+    ? `${threadSize} x ${lengthValue}`
+    : (threadSize || lengthValue || "");
+
+  const imageUrl = firstImageSrc(document.querySelector("main, [role='main']") || document.body);
+  const row = {
+    Product: title || (partNumber ? `Part ${partNumber}` : "Product"),
+    Description: title,
+    ProductURL: location.href,
+    McMasterPartNumber: partNumber,
+    RowImageURL: imageUrl,
+    RowImageSource: imageUrl ? "product-page" : "none",
+    PageBreadcrumbs: breadcrumbs,
+    PageTitle: title,
+    PageSectionSummary: normalizeText(document.querySelector("main p, [role='main'] p")?.textContent || ""),
+    ProductDetailThreadSize: threadSize,
+    ProductDetailLength: lengthValue,
+    ProductDetailVariant: variant,
+    ProductDetailSpecs: specText,
+    ProductDetailNotes: detailNotes
+  };
+
+  // Flatten first-spec values for easier mapping without regex.
+  for (const [key, value] of Object.entries(specMap)) {
+    const normalizedKey = `Spec_${key}`.replace(/[^a-zA-Z0-9_]+/g, "_").replace(/_+/g, "_").replace(/^_|_$/g, "");
+    if (!normalizedKey) continue;
+    row[normalizedKey] = value;
+  }
+
+  return {
+    ok: Boolean(title || partNumber),
+    pageType: "product-detail",
+    pageTitle: title,
+    headers: Object.keys(row),
+    row,
+    error: title || partNumber ? undefined : "Could not extract product detail fields from this page."
   };
 }
 
@@ -2292,7 +3253,8 @@ function buildExportPayload(capture, hints) {
 }
 
 function buildExportObject(capture, hints) {
-  const items = capture.rows.map((row) => toInventreeItem(row, hints, capture));
+  const templateResolution = resolveTemplateForCapture(capture, hints);
+  const items = capture.rows.map((row) => toInventreeItem(row, hints, capture, templateResolution.template));
   return {
     source: capture.source || "catalog",
     page_type: capture.pageType || "default",
@@ -2307,8 +3269,41 @@ function buildExportObject(capture, hints) {
 }
 
 function getTemplateKey(capture, hints) {
-  const source = normalizeTemplateKey(capture?.source || hints?.sourceMode || "default");
-  const pageType = normalizeTemplateKey(capture?.pageType || "default");
+  const resolution = resolveTemplateForCapture(capture, hints);
+  return resolution.resolvedKey || resolution.requestedKey;
+}
+
+function normalizeTemplatePathPattern(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  return raw.startsWith("/") ? raw : `/${raw}`;
+}
+
+function getCaptureHost(capture) {
+  const pageUrl = String(capture?.pageUrl || "").trim();
+  if (!pageUrl) return "";
+  try {
+    return String(new URL(pageUrl).hostname || "").trim().toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function getCapturePathname(capture) {
+  const pageUrl = String(capture?.pageUrl || "").trim();
+  if (!pageUrl) return "";
+  try {
+    return String(new URL(pageUrl).pathname || "").trim() || "/";
+  } catch {
+    return "";
+  }
+}
+
+function buildTemplateScopeKey({ source, pageType, host, pathPattern }) {
+  if (host) {
+    const base = `host:${host}|page:${pageType}`;
+    return pathPattern ? `${base}|path:${pathPattern}` : base;
+  }
   return `${source}:${pageType}`;
 }
 
@@ -2317,8 +3312,178 @@ function normalizeTemplateKey(value) {
   return key === "mcmaster-carr" ? "mcmaster" : key;
 }
 
-function toInventreeItem(row, hints, capture) {
-  const mappingTemplate = getMappingTemplateForCapture(capture, hints);
+function parseHostTemplateKey(key) {
+  const match = String(key || "").match(/^host:([^|]+)\|page:([^|]+)(?:\|path:(.+))?$/i);
+  if (!match) return null;
+  return {
+    host: String(match[1] || "").trim().toLowerCase(),
+    pageType: String(match[2] || "").trim().toLowerCase(),
+    pathPattern: String(match[3] || "").trim()
+  };
+}
+
+function wildcardPathMatches(pathPattern, pathname) {
+  const pattern = normalizeTemplatePathPattern(pathPattern);
+  const path = String(pathname || "").trim() || "/";
+  if (!pattern) return false;
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+  try {
+    return new RegExp(`^${escaped}$`, "i").test(path);
+  } catch {
+    return false;
+  }
+}
+
+function buildTemplateCandidateKeys(capture, hints, templates) {
+  const source = normalizeTemplateKey(capture?.source || hints?.sourceMode || "default");
+  const pageType = normalizeTemplateKey(capture?.pageType || "default");
+  const host = getCaptureHost(capture);
+  const pathname = getCapturePathname(capture);
+  const pathPattern = normalizeTemplatePathPattern(hints?.mappingTemplatePathPattern || "");
+  const context = { source, pageType, host, pathPattern };
+
+  const keys = [];
+  const seen = new Set();
+
+  function push(key) {
+    const normalized = String(key || "").trim();
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    keys.push(normalized);
+  }
+
+  push(buildTemplateScopeKey(context));
+
+  if (host) {
+    if (pathPattern) {
+      push(buildTemplateScopeKey({ ...context, pathPattern: "" }));
+    }
+
+    if (pathname) {
+      const scoredOverrides = [];
+      for (const key of Object.keys(templates || {})) {
+        const parsed = parseHostTemplateKey(key);
+        if (!parsed || !parsed.pathPattern) continue;
+        if (parsed.host !== host || parsed.pageType !== pageType) continue;
+        if (!wildcardPathMatches(parsed.pathPattern, pathname)) continue;
+        const wildcardPenalty = (parsed.pathPattern.match(/\*/g) || []).length * 100;
+        const score = parsed.pathPattern.length - wildcardPenalty;
+        scoredOverrides.push({ key, score });
+      }
+
+      scoredOverrides
+        .sort((a, b) => b.score - a.score)
+        .forEach((item) => push(item.key));
+    }
+
+    push(buildTemplateScopeKey({ ...context, pageType: "default", pathPattern: "" }));
+  }
+
+  push(`${source}:${pageType}`);
+  push(`${source}:default`);
+  push(source);
+
+  return keys;
+}
+
+function resolveTemplateForCapture(capture, hints) {
+  const templates = hints?.mappingTemplates && typeof hints.mappingTemplates === "object" ? hints.mappingTemplates : {};
+  const candidates = buildTemplateCandidateKeys(capture, hints, templates);
+  const resolvedKey = candidates.find((key) => templates[key] && typeof templates[key] === "object") || "";
+  const rawTemplate = resolvedKey ? templates[resolvedKey] : {};
+
+  const normalized = {};
+  for (const targetKey of MAPPING_TARGET_KEYS) {
+    normalized[targetKey] = {
+      sourceField: String(rawTemplate?.[targetKey]?.sourceField || "").trim(),
+      regex: String(rawTemplate?.[targetKey]?.regex || "").trim()
+    };
+  }
+
+  return {
+    requestedKey: candidates[0] || `${normalizeTemplateKey(capture?.source || hints?.sourceMode || "default")}:${normalizeTemplateKey(capture?.pageType || "default")}`,
+    resolvedKey,
+    template: normalized
+  };
+}
+
+function firstNonEmpty(values) {
+  for (const value of values || []) {
+    const text = String(value || "").trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function findRowValueByRegex(row, regex) {
+  const pattern = regex instanceof RegExp ? regex : null;
+  if (!pattern) return "";
+  for (const [key, value] of Object.entries(row || {})) {
+    if (!pattern.test(String(key || ""))) continue;
+    const text = String(value || "").trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+function deriveVariantFallback(row) {
+  const direct = firstNonEmpty([
+    row?.ProductDetailVariant,
+    row?.Variant,
+    row?.Size,
+    row?.ThreadSize
+  ]);
+  if (direct) return direct;
+
+  const threadSize = firstNonEmpty([
+    row?.ProductDetailThreadSize,
+    findRowValueByRegex(row, /^Spec_.*Thread.*Size/i),
+    findRowValueByRegex(row, /^Spec_.*Thread/i)
+  ]);
+
+  const length = firstNonEmpty([
+    row?.ProductDetailLength,
+    findRowValueByRegex(row, /^Spec_.*(?:Length|Lg)_?/i),
+    findRowValueByRegex(row, /^Spec_.*Length/i)
+  ]);
+
+  if (threadSize && length) return `${threadSize} x ${length}`;
+  if (threadSize || length) return threadSize || length;
+
+  const titleText = firstNonEmpty([row?.Product, row?.Description, row?.PageTitle]);
+  const sizeMatch = titleText.match(/((?:M\d+(?:\.\d+)?|#\d+|\d+\/\d+(?:-\d+)?)\s*x\s*(?:\d+(?:\.\d+)?|\d+\/\d+)\s*(?:mm|cm|m|in|["'])?)/i);
+  return sizeMatch ? String(sizeMatch[1] || "").trim() : "";
+}
+
+function deriveNotesFallback(row, mappedDescription) {
+  const direct = firstNonEmpty([
+    row?.ProductDetailNotes,
+    row?.ProductDetailSpecs,
+    row?.DetailedSpecs,
+    row?.Specifications,
+    row?.Specs
+  ]);
+  if (direct) return direct;
+
+  const specPairs = [];
+  for (const [key, value] of Object.entries(row || {})) {
+    const keyText = String(key || "");
+    if (!/^Spec_/i.test(keyText)) continue;
+    const val = String(value || "").trim();
+    if (!val) continue;
+    const label = keyText.replace(/^Spec_/i, "").replace(/_/g, " ").trim();
+    specPairs.push(`${label}: ${val}`);
+    if (specPairs.length >= 20) break;
+  }
+  if (specPairs.length > 0) {
+    return specPairs.join("\n").slice(0, 16000);
+  }
+
+  return String(mappedDescription || "").trim();
+}
+
+function toInventreeItem(row, hints, capture, mappingTemplateOverride) {
+  const mappingTemplate = mappingTemplateOverride || getMappingTemplateForCapture(capture, hints);
   const rowKeys = Object.keys(row || {});
   const mappedName = pickMappedValue(row, capture, mappingTemplate.name);
   const mappedDescription = pickMappedValue(row, capture, mappingTemplate.description);
@@ -2326,14 +3491,17 @@ function toInventreeItem(row, hints, capture) {
   const mappedCategory = pickMappedValue(row, capture, mappingTemplate.category);
   const mappedSubcategory = pickMappedValue(row, capture, mappingTemplate.subcategory);
   const mappedVariant = pickMappedValue(row, capture, mappingTemplate.variant);
+  const mappedNotes = pickMappedValue(row, capture, mappingTemplate.notes);
 
-  const name = mappedName || pickValue(row, [
+  const fallbackName = pickValue(row, [
     hints.nameHeaderHint,
     "Product Name",
     "Product",
     "Description",
     "Name"
   ]) || row.McMasterPartNumber || row.ASIN || "Product";
+  const composedName = buildComposedName(row, capture, hints);
+  const name = composedName || mappedName || fallbackName;
 
   const description = mappedDescription || pickValue(row, [
     hints.descriptionHeaderHint,
@@ -2362,8 +3530,11 @@ function toInventreeItem(row, hints, capture) {
   ]);
 
   const imageUrl = hints.includeImageUrls
-    ? pickImageUrl(row, hints.imageHeaderHint)
+    ? pickImageUrl(row, hints, capture)
     : "";
+
+  const variantText = mappedVariant || deriveVariantFallback(row);
+  const notesText = mappedNotes || deriveNotesFallback(row, description);
 
   return {
     name,
@@ -2373,7 +3544,8 @@ function toInventreeItem(row, hints, capture) {
     quantity: mappedQuantity || pickValue(row, ["Quantity", "Qty", "Order Quantity"]),
     category_text: mappedCategory,
     subcategory_text: mappedSubcategory,
-    variant_text: mappedVariant,
+    variant_text: variantText,
+    notes: notesText,
     supplier_link: row.ProductURL || row["Product URL"] || "",
     image_url: imageUrl,
     source_fields: rowKeys,
@@ -2381,53 +3553,81 @@ function toInventreeItem(row, hints, capture) {
   };
 }
 
-function getMappingTemplateForCapture(capture, hints) {
-  const templates = hints?.mappingTemplates && typeof hints.mappingTemplates === "object" ? hints.mappingTemplates : {};
-  const key = getTemplateKey(capture, hints);
-  const fallbackKey = `${normalizeTemplateKey(capture?.source || hints?.sourceMode || "default")}:default`;
-  const legacyKey = normalizeTemplateKey(capture?.source || hints?.sourceMode || "default");
-  const template = (templates[key] && typeof templates[key] === "object")
-    ? templates[key]
-    : (templates[fallbackKey] && typeof templates[fallbackKey] === "object")
-      ? templates[fallbackKey]
-      : (templates[legacyKey] && typeof templates[legacyKey] === "object")
-        ? templates[legacyKey]
-        : {};
-  const normalized = {};
-  for (const targetKey of MAPPING_TARGET_KEYS) {
-    normalized[targetKey] = {
-      sourceField: String(template?.[targetKey]?.sourceField || "").trim(),
-      regex: String(template?.[targetKey]?.regex || "").trim()
-    };
+function buildComposedName(row, capture, hints) {
+  const rawFields = String(hints?.nameComposeFields || "").trim();
+  if (!rawFields) return "";
+
+  const fields = rawFields
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (fields.length === 0) return "";
+
+  const delimiter = String(hints?.nameComposeDelimiter || " - ");
+  const parts = fields
+    .map((field) => resolveNamedSourceField(row, capture, field))
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+
+  return parts.length > 0 ? parts.join(delimiter) : "";
+}
+
+function resolveNamedSourceField(row, capture, fieldName) {
+  const field = String(fieldName || "").trim();
+  if (!field) return "";
+
+  switch (field) {
+    case "__page_title":
+      return String(capture?.pageTitle || "");
+    case "__page_url":
+      return String(capture?.pageUrl || "");
+    case "__page_breadcrumbs":
+      return String(capture?.pageBreadcrumbs || "");
+    case "__page_section_summary":
+      return String(capture?.pageSectionSummary || "");
+    case "__left_filters":
+      return String(capture?.leftFiltersSummary || "");
+    case "__page_primary_image":
+      return String(capture?.pagePrimaryImageUrl || "");
+    case "__sidebar_primary_image":
+      return String(capture?.sidebarPrimaryImageUrl || "");
+    case "__selected_page_image":
+      return String(capture?.selectedPageImageUrl || "");
+    default:
+      break;
   }
-  return normalized;
+
+  const keyLc = field.toLowerCase();
+  for (const [key, value] of Object.entries(row || {})) {
+    if (String(key || "").trim().toLowerCase() === keyLc) {
+      return String(value || "");
+    }
+  }
+  return "";
+}
+
+function getMappingTemplateForCapture(capture, hints) {
+  return resolveTemplateForCapture(capture, hints).template;
 }
 
 function pickMappedValue(row, capture, config) {
   const sourceField = String(config?.sourceField || "").trim();
   if (!sourceField) return "";
 
-  let value = "";
-  if (sourceField === "__page_title") {
-    value = String(capture?.pageTitle || "");
-  } else if (sourceField === "__page_url") {
-    value = String(capture?.pageUrl || "");
-  } else {
-    value = String(row?.[sourceField] || "");
-  }
+  const value = String(resolveNamedSourceField(row, capture, sourceField) || "");
 
-  value = String(value || "").trim();
-  if (!value) return "";
+  const trimmedValue = value.trim();
+  if (!trimmedValue) return "";
 
   const regexText = String(config?.regex || "").trim();
-  if (!regexText) return value;
+  if (!regexText) return trimmedValue;
 
   try {
-    const match = value.match(buildUserRegex(regexText));
+    const match = trimmedValue.match(buildUserRegex(regexText));
     if (!match) return "";
     return String(match[1] || match[0] || "").trim();
   } catch {
-    return value;
+    return trimmedValue;
   }
 }
 
@@ -2440,8 +3640,15 @@ function buildUserRegex(value) {
   return new RegExp(text, "i");
 }
 
-function pickImageUrl(row, imageHeaderHint) {
-  const hint = String(imageHeaderHint || "").trim().toLowerCase();
+function pickImageUrl(row, hints, capture) {
+  const globalSourceField = String(hints?.globalImageSourceField || "").trim();
+  if (globalSourceField) {
+    const forcedValue = resolveNamedSourceField(row, capture, globalSourceField);
+    const forcedImage = firstImageUrlInText(forcedValue);
+    if (forcedImage) return forcedImage;
+  }
+
+  const hint = String(hints?.imageHeaderHint || "").trim().toLowerCase();
   if (hint) {
     for (const [key, value] of Object.entries(row || {})) {
       if (String(key).trim().toLowerCase() === hint) {
@@ -2509,6 +3716,7 @@ function buildCsvText(capture, hints) {
   const columns = [
     "name",
     "description",
+    "notes",
     "mpn",
     "supplier_part_number",
     "quantity",
@@ -2532,6 +3740,8 @@ function buildCsvText(capture, hints) {
           return csvEscape(item.name);
         case "description":
           return csvEscape(item.description);
+        case "notes":
+          return csvEscape(item.notes);
         case "mpn":
           return csvEscape(item.mpn);
         case "supplier_part_number":

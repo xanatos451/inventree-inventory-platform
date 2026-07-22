@@ -235,6 +235,40 @@
       font-size: 11px;
     }
 
+    .collapsible {
+      margin-top: 8px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fffef8;
+      overflow: hidden;
+    }
+
+    .collapsible summary {
+      cursor: pointer;
+      padding: 8px 10px;
+      font-size: 12px;
+      font-weight: 700;
+      background: #f8f2e6;
+      border-bottom: 1px solid transparent;
+      user-select: none;
+    }
+
+    .collapsible[open] summary {
+      border-bottom-color: #e2d8c8;
+    }
+
+    .collapsible-body {
+      padding: 8px 10px;
+    }
+
+    .collapsible-body .label:first-child {
+      margin-top: 0;
+    }
+
+    .label.with-gap {
+      margin-top: 10px;
+    }
+
     .help-wrap {
       margin-top: 10px;
       border: 1px solid var(--line);
@@ -248,6 +282,10 @@
       padding: 8px 10px;
       font-size: 12px;
       font-weight: 700;
+      background: #f8f2e6;
+      border-bottom: 1px solid #e2d8c8;
+      user-select: none;
+    }
 
     body.full-mode .preview {
       max-height: 480px;
@@ -275,20 +313,24 @@
     .top-actions {
       margin-top: 8px;
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 8px;
     }
 
     body.full-mode .top-actions {
-      max-width: 420px;
+      max-width: 680px;
     }
 
     body.full-mode #openFullPageBtn {
       opacity: 0.65;
     }
-      background: #f8f2e6;
-      border-bottom: 1px solid #e2d8c8;
-      user-select: none;
+
+    body.full-mode .collapsible {
+      margin-top: 10px;
+    }
+
+    body.full-mode .collapsible-body {
+      padding: 10px 12px;
     }
 
     .help-body {
@@ -468,6 +510,48 @@
       margin-bottom: 6px;
     }
 
+    .field-picker-wrap {
+      margin-top: 6px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fffef8;
+      padding: 8px;
+    }
+
+    .field-picker-toolbar {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+
+    .field-picker-list {
+      max-height: 130px;
+      overflow: auto;
+      border: 1px solid #e2d8c8;
+      border-radius: 6px;
+      padding: 6px;
+      background: #fffef9;
+    }
+
+    .field-picker-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: #2f454d;
+      margin-bottom: 4px;
+    }
+
+    .field-picker-item:last-child {
+      margin-bottom: 0;
+    }
+
+    .field-picker-empty {
+      font-size: 11px;
+      color: #5f727b;
+    }
+
     body.full-mode .mapping-row {
       grid-template-columns: 180px 1fr 1fr;
     }
@@ -481,9 +565,10 @@
     <div class="section">
       <div class="grid">
         <button id="captureBtn" type="button">Capture Current Page</button>
-        <button id="saveSettingsBtn" class="secondary" type="button">Save API Settings</button>
+        <button id="saveSettingsBtn" class="secondary" type="button">Save All Settings (API + Export + Templates)</button>
       </div>
       <div class="top-actions">
+        <button id="openSettingsBtn" class="secondary" type="button">Settings Panel</button>
         <button id="helpBtn" class="secondary" type="button">Help / Docs</button>
         <button id="openFullPageBtn" class="secondary" type="button">Open Larger View</button>
       </div>
@@ -496,26 +581,29 @@
         <option value="amazon">Amazon Orders</option>
       </select>
 
-      <label class="check"><input id="crawlLinkedPages" type="checkbox" /> Scrape linked / child pages (Bolt Depot parent pages, McMaster category pages)</label>
-      <input id="maxLinkedPages" type="number" min="1" max="80" placeholder="Max linked pages to crawl (default 20)" />
+      <details id="linkedPagesPanel" class="collapsible" data-collapse-key="linkedPagesPanel">
+        <summary>Linked Page Crawl and Selection</summary>
+        <div class="collapsible-body">
+          <label class="check"><input id="crawlLinkedPages" type="checkbox" /> Scrape linked / child pages (Bolt Depot parent pages, McMaster category pages)</label>
+          <input id="maxLinkedPages" type="number" min="1" max="80" placeholder="Max linked pages to crawl (default 20)" />
 
-      <div class="grid">
-        <button id="previewLinksBtn" class="secondary mini" type="button">Preview Items / Linked Pages</button>
-        <button id="selectAllLinksBtn" class="secondary mini" type="button">Select All</button>
-      </div>
-      <input id="linkedPagesFilter" type="text" placeholder="Filter by name or URL (e.g. 1_4-20, B08N5, coarse)" />
-      <div class="grid">
-        <button id="selectFilteredLinksBtn" class="secondary mini" type="button">Select Filtered</button>
-        <button id="clearFilteredLinksBtn" class="secondary mini" type="button">Clear Filtered</button>
-      </div>
-      <div style="margin-top: 6px;">
-        <button id="invertFilteredLinksBtn" class="secondary mini" type="button">Invert Visible</button>
-      </div>
-      <div style="margin-top: 6px;">
-        <button id="clearAllLinksBtn" class="secondary mini" type="button">Clear All</button>
-      </div>
-      <div id="linkedPagesSummary" class="meta">Linked page preview not loaded.</div>
-      <div id="linkedPagesList" class="link-list"></div>
+          <div class="grid">
+            <button id="previewLinksBtn" class="secondary mini" type="button">Preview Items / Linked Pages</button>
+            <button id="selectAllLinksBtn" class="secondary mini" type="button">Select All</button>
+          </div>
+          <input id="linkedPagesFilter" type="text" placeholder="Filter by name or URL (e.g. 1_4-20, B08N5, coarse)" />
+          <div class="grid">
+            <button id="selectFilteredLinksBtn" class="secondary mini" type="button">Select Filtered</button>
+            <button id="clearFilteredLinksBtn" class="secondary mini" type="button">Clear Filtered</button>
+          </div>
+          <div style="margin-top: 6px;" class="grid">
+            <button id="invertFilteredLinksBtn" class="secondary mini" type="button">Invert Visible</button>
+            <button id="clearAllLinksBtn" class="secondary mini" type="button">Clear All</button>
+          </div>
+          <div id="linkedPagesSummary" class="meta">Linked page preview not loaded.</div>
+          <div id="linkedPagesList" class="link-list"></div>
+        </div>
+      </details>
 
       <div id="captureMeta" class="meta">No capture yet.</div>
     </div>
@@ -527,113 +615,179 @@
         <option value="direct">Direct InvenTree API (local sync)</option>
       </select>
 
-      <div class="label">InvenTree Base URL</div>
-      <input id="inventreeUrl" type="text" placeholder="https://inventree.example.com" />
+      <details id="settingsPanel" class="collapsible" data-collapse-key="settingsPanel">
+        <summary>Extension Settings: API, Defaults, and Field Mapping</summary>
+        <div class="collapsible-body">
+          <div class="label">InvenTree Base URL</div>
+          <input id="inventreeUrl" type="text" placeholder="https://inventree.example.com" />
 
-      <div class="label">API Token</div>
-      <input id="inventreeToken" type="password" placeholder="Token value" />
+          <div class="label">API Token</div>
+          <input id="inventreeToken" type="password" placeholder="Token value" />
 
-      <div class="label">Plugin Endpoint Path</div>
-      <input id="inventreeEndpointPath" type="text" placeholder="/api/plugin/product-import/" />
+          <details id="connectionPathsPanel" class="collapsible" data-collapse-key="connectionPathsPanel">
+            <summary>Connection Paths and API Endpoints</summary>
+            <div class="collapsible-body">
+              <div class="label">Plugin Endpoint Path</div>
+              <input id="inventreeEndpointPath" type="text" placeholder="/api/plugin/product-import/" />
 
-      <div class="label">Direct API Paths</div>
-      <div class="grid">
-        <input id="inventreePartApiPath" type="text" placeholder="/api/part/" />
-        <input id="inventreeSupplierPartApiPath" type="text" placeholder="/api/company/part/" />
-      </div>
-      <input id="inventreeStockItemApiPath" type="text" placeholder="/api/stock/" />
+              <div class="label">Direct API Paths</div>
+              <div class="grid">
+                <input id="inventreePartApiPath" type="text" placeholder="/api/part/" />
+                <input id="inventreeSupplierPartApiPath" type="text" placeholder="/api/company/part/" />
+              </div>
+              <input id="inventreeStockItemApiPath" type="text" placeholder="/api/stock/" />
+              <div class="grid">
+                <input id="inventreePartParameterApiPath" type="text" placeholder="/api/part/parameter/" />
+                <input id="inventreeParameterTemplateApiPath" type="text" placeholder="/api/part/parameter/template/" />
+              </div>
 
-      <div class="label">Direct Sync Defaults</div>
-      <div class="grid">
-        <input id="inventreeDefaultCategoryId" type="number" min="1" placeholder="Default category ID (required for direct create)" />
-        <input id="inventreeDefaultSupplierId" type="number" min="1" placeholder="Default supplier ID (optional)" />
-      </div>
-      <label class="check"><input id="enableCategoryBuilder" type="checkbox" /> Auto-build / assign subcategories from mapped category fields</label>
-      <div class="category-picker">
-        <div class="grid">
-          <button id="fetchCategoriesBtn" class="secondary" type="button">Fetch Existing Categories</button>
-          <select id="existingCategorySelect">
-            <option value="">Select existing category for default/root</option>
-          </select>
+              <div class="grid">
+                <input id="partImageUploadPath" type="text" placeholder="/api/part/{id}/upload/" />
+                <input id="partIdResponsePath" type="text" placeholder="Part ID response path (e.g. created_parts[].id)" />
+              </div>
+              <button id="testPathBtn" class="secondary mini" type="button">Test Path</button>
+            </div>
+          </details>
+
+          <details id="directDefaultsPanel" class="collapsible" data-collapse-key="directDefaultsPanel">
+            <summary>Direct Sync Defaults and Category Controls</summary>
+            <div class="collapsible-body">
+              <div class="grid">
+                <input id="inventreeDefaultCategoryId" type="number" min="1" placeholder="Default category ID (required for direct create)" />
+                <input id="inventreeDefaultSupplierId" type="number" min="1" placeholder="Default supplier ID (optional)" />
+              </div>
+              <label class="check"><input id="enableCategoryBuilder" type="checkbox" /> Auto-build / assign subcategories from mapped category fields</label>
+              <div class="category-picker">
+                <div class="grid">
+                  <button id="fetchCategoriesBtn" class="secondary" type="button">Fetch Existing Categories</button>
+                  <select id="existingCategorySelect">
+                    <option value="">Select existing category for default/root</option>
+                  </select>
+                </div>
+                <div style="margin-top: 6px;">
+                  <button id="previewCategoryAssignmentsBtn" class="secondary mini" type="button">Preview Category Plan</button>
+                </div>
+                <div id="categoryPickerMeta" class="category-picker-meta">Fetch categories to pick an existing default/root category.</div>
+              </div>
+              <div class="grid">
+                <input id="inventreeDefaultLocationId" type="number" min="1" placeholder="Default stock location ID (optional)" />
+                <input id="defaultStockQuantity" type="number" min="0" step="0.001" placeholder="Default stock quantity (e.g. 1)" />
+              </div>
+              <input id="stockQuantityHeaderHint" type="text" placeholder="Stock quantity header hint (optional, e.g. Qty, Quantity)" />
+
+              <label class="check"><input id="syncSupplierParts" type="checkbox" /> Sync supplier-part records in direct mode</label>
+              <label class="check"><input id="syncStockRecords" type="checkbox" /> Create stock items in direct mode</label>
+              <label class="check"><input id="syncPartParameters" type="checkbox" /> Sync part parameters in direct mode</label>
+              <label class="check"><input id="autoCreateMissingParameterTemplates" type="checkbox" /> Auto-create missing parameter templates by name in direct mode</label>
+              <div class="label">Part Parameter Mapping Rules (optional)</div>
+              <textarea id="parameterMappingsText" placeholder="One mapping per line: Parameter Name = SourceField&#10;Example:&#10;Thread Size = ProductDetailThreadSize&#10;Length = ProductDetailLength&#10;Material = Spec_Material"></textarea>
+              <div class="grid">
+                <button id="generateParameterMappingsBtn" class="secondary mini" type="button">Generate Rules From Captured Fields</button>
+              </div>
+            </div>
+          </details>
+
+          <details id="headerMappingPanel" class="collapsible" data-collapse-key="headerMappingPanel">
+            <summary>Header Mapping Hints and Template Rules</summary>
+            <div class="collapsible-body">
+              <div class="label">Header Mapping Hints</div>
+              <div class="grid">
+                <input id="nameHeaderHint" type="text" placeholder="Name header (optional)" />
+                <input id="descriptionHeaderHint" type="text" placeholder="Description header (optional)" />
+              </div>
+              <div class="grid">
+                <input id="mpnHeaderHint" type="text" placeholder="MPN header (optional)" />
+                <input id="supplierPnHeaderHint" type="text" placeholder="Supplier PN header (optional)" />
+              </div>
+              <input id="imageHeaderHint" type="text" placeholder="Image URL header (optional)" />
+
+              <div class="label with-gap">Site Mapping Template</div>
+              <div class="mapping-wrap">
+                <div id="mappingTemplateScope" class="mapping-scope">Template scope uses source + page type key for this capture/session.</div>
+                <input id="mappingTemplatePathPattern" type="text" placeholder="Optional URL path pattern override, e.g. /products/* (supports *)" />
+                <div class="grid" style="margin-top: 6px;">
+                  <select id="savedTemplateSelect">
+                    <option value="">No saved templates</option>
+                  </select>
+                  <button id="loadTemplateBtn" class="secondary mini" type="button">Load Into Current</button>
+                </div>
+                <div style="margin-top: 6px;">
+                  <button id="deleteTemplateBtn" class="secondary mini" type="button">Delete Selected Template</button>
+                </div>
+                <div class="mapping-grid">
+                  <div class="mapping-row">
+                    <div class="mapping-target">Part Name</div>
+                    <select data-map-source="name"></select>
+                    <input data-map-regex="name" type="text" placeholder="Regex extract (optional)" />
+                  </div>
+                  <div class="mapping-row">
+                    <div class="mapping-target">Description</div>
+                    <select data-map-source="description"></select>
+                    <input data-map-regex="description" type="text" placeholder="Regex extract (optional)" />
+                  </div>
+                  <div class="mapping-row">
+                    <div class="mapping-target">Quantity</div>
+                    <select data-map-source="quantity"></select>
+                    <input data-map-regex="quantity" type="text" placeholder="Regex extract (optional)" />
+                  </div>
+                  <div class="mapping-row">
+                    <div class="mapping-target">Category</div>
+                    <select data-map-source="category"></select>
+                    <input data-map-regex="category" type="text" placeholder="Regex extract (optional)" />
+                  </div>
+                  <div class="mapping-row">
+                    <div class="mapping-target">Subcategory / Material</div>
+                    <select data-map-source="subcategory"></select>
+                    <input data-map-regex="subcategory" type="text" placeholder="Regex extract (optional)" />
+                  </div>
+                  <div class="mapping-row">
+                    <div class="mapping-target">Variant / Size</div>
+                    <select data-map-source="variant"></select>
+                    <input data-map-regex="variant" type="text" placeholder="Regex extract (optional)" />
+                  </div>
+                  <div class="mapping-row">
+                    <div class="mapping-target">Part Notes</div>
+                    <select data-map-source="notes"></select>
+                    <input data-map-regex="notes" type="text" placeholder="Regex extract (optional)" />
+                  </div>
+                </div>
+                <div class="mapping-scope">Use a source field plus an optional regex to extract only the portion you want. Example: ^([^,]+) for the first comma-separated segment. Path pattern overrides are matched before host/page defaults.</div>
+              </div>
+            </div>
+          </details>
+
+          <details id="imageBehaviorPanel" class="collapsible" data-collapse-key="imageBehaviorPanel">
+            <summary>Image and Existing-Match Behavior</summary>
+            <div class="collapsible-body">
+              <div class="label">Name Composition (optional)</div>
+              <input id="nameComposeFields" type="text" placeholder="Comma-separated fields, e.g. __page_title, Lg., Threading" />
+              <input id="nameComposeDelimiter" type="text" placeholder="Name join delimiter (default:  - )" />
+              <div class="field-picker-wrap">
+                <input id="nameComposeFieldSearch" type="text" placeholder="Search captured fields for quick selection" />
+                <div class="field-picker-toolbar">
+                  <button id="selectAllNameComposeFieldsBtn" class="secondary mini" type="button">Select Visible</button>
+                  <button id="clearNameComposeFieldsBtn" class="secondary mini" type="button">Clear All</button>
+                </div>
+                <div id="nameComposeFieldPicker" class="field-picker-list">
+                  <div class="field-picker-empty">Capture a page to load table fields, then select fields to build the name.</div>
+                </div>
+              </div>
+
+              <div class="label with-gap">Global Image Source (optional)</div>
+              <input id="globalImageSourceField" type="text" placeholder="Field for all parts image, e.g. SelectedPageImageURL" />
+
+              <div class="label">Existing Match Strategy</div>
+              <select id="existingMatchStrategy">
+                <option value="skip">Skip matching existing entries</option>
+                <option value="update">Update matching existing entries</option>
+              </select>
+
+              <label class="check"><input id="includeImageUrls" type="checkbox" /> Include image URL in exported/sent items</label>
+              <label class="check"><input id="uploadImagesIfSupported" type="checkbox" /> Upload images to InvenTree if part IDs are returned</label>
+            </div>
+          </details>
         </div>
-        <div style="margin-top: 6px;">
-          <button id="previewCategoryAssignmentsBtn" class="secondary mini" type="button">Preview Category Plan</button>
-        </div>
-        <div id="categoryPickerMeta" class="category-picker-meta">Fetch categories to pick an existing default/root category.</div>
-      </div>
-      <div class="grid">
-        <input id="inventreeDefaultLocationId" type="number" min="1" placeholder="Default stock location ID (optional)" />
-        <input id="defaultStockQuantity" type="number" min="0" step="0.001" placeholder="Default stock quantity (e.g. 1)" />
-      </div>
-      <input id="stockQuantityHeaderHint" type="text" placeholder="Stock quantity header hint (optional, e.g. Qty, Quantity)" />
-
-      <label class="check"><input id="syncSupplierParts" type="checkbox" /> Sync supplier-part records in direct mode</label>
-      <label class="check"><input id="syncStockRecords" type="checkbox" /> Create stock items in direct mode</label>
-
-      <div class="label">Header Mapping Hints</div>
-      <div class="grid">
-        <input id="nameHeaderHint" type="text" placeholder="Name header (optional)" />
-        <input id="descriptionHeaderHint" type="text" placeholder="Description header (optional)" />
-      </div>
-      <div class="grid">
-        <input id="mpnHeaderHint" type="text" placeholder="MPN header (optional)" />
-        <input id="supplierPnHeaderHint" type="text" placeholder="Supplier PN header (optional)" />
-      </div>
-      <div class="grid">
-        <input id="imageHeaderHint" type="text" placeholder="Image URL header (optional)" />
-        <input id="partImageUploadPath" type="text" placeholder="/api/part/{id}/upload/" />
-      </div>
-      <div class="grid">
-        <input id="partIdResponsePath" type="text" placeholder="Part ID response path (e.g. created_parts[].id)" />
-        <button id="testPathBtn" class="secondary" type="button">Test Path</button>
-      </div>
-
-      <div class="label">Site Mapping Template</div>
-      <div class="mapping-wrap">
-        <div id="mappingTemplateScope" class="mapping-scope">Template applies to the currently selected source site.</div>
-        <div class="mapping-grid">
-          <div class="mapping-row">
-            <div class="mapping-target">Part Name</div>
-            <select data-map-source="name"></select>
-            <input data-map-regex="name" type="text" placeholder="Regex extract (optional)" />
-          </div>
-          <div class="mapping-row">
-            <div class="mapping-target">Description</div>
-            <select data-map-source="description"></select>
-            <input data-map-regex="description" type="text" placeholder="Regex extract (optional)" />
-          </div>
-          <div class="mapping-row">
-            <div class="mapping-target">Quantity</div>
-            <select data-map-source="quantity"></select>
-            <input data-map-regex="quantity" type="text" placeholder="Regex extract (optional)" />
-          </div>
-          <div class="mapping-row">
-            <div class="mapping-target">Category</div>
-            <select data-map-source="category"></select>
-            <input data-map-regex="category" type="text" placeholder="Regex extract (optional)" />
-          </div>
-          <div class="mapping-row">
-            <div class="mapping-target">Subcategory / Material</div>
-            <select data-map-source="subcategory"></select>
-            <input data-map-regex="subcategory" type="text" placeholder="Regex extract (optional)" />
-          </div>
-          <div class="mapping-row">
-            <div class="mapping-target">Variant / Size</div>
-            <select data-map-source="variant"></select>
-            <input data-map-regex="variant" type="text" placeholder="Regex extract (optional)" />
-          </div>
-        </div>
-        <div class="mapping-scope">Use a source field plus an optional regex to extract only the portion you want. Example: `^([^,]+)` for the first comma-separated segment.</div>
-      </div>
-
-      <div class="label">Existing Match Strategy</div>
-      <select id="existingMatchStrategy">
-        <option value="skip">Skip matching existing entries</option>
-        <option value="update">Update matching existing entries</option>
-      </select>
-
-      <label class="check"><input id="includeImageUrls" type="checkbox" /> Include image URL in exported/sent items</label>
-      <label class="check"><input id="uploadImagesIfSupported" type="checkbox" /> Upload images to InvenTree if part IDs are returned</label>
+      </details>
 
       <div class="grid">
         <button id="sendBtn" type="button">Send To InvenTree</button>
@@ -666,11 +820,18 @@
         <div id="mappedPreviewMeta" class="mapped-preview-meta">Capture a page to preview transformed fields.</div>
         <div class="preview" id="mappedPreview"></div>
       </div>
+      <details id="sourceFieldSamplesPanel" class="collapsible" data-collapse-key="sourceFieldSamplesPanel">
+        <summary>Source Field Samples</summary>
+        <div class="collapsible-body">
+          <div id="sourceFieldSamplesMeta" class="mapped-preview-meta">Capture a page to inspect field samples.</div>
+          <div class="preview" id="sourceFieldSamples"></div>
+        </div>
+      </details>
     </div>
 
     <div class="section">
       <div class="help-wrap">
-        <details id="helpPanel">
+        <details id="helpPanel" data-collapse-key="helpPanel">
           <summary>Extension Help and Configuration Guide</summary>
           <div class="help-body">
             <h3>Quick Start</h3>
