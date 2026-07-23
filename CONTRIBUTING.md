@@ -52,6 +52,23 @@ The legacy `ci-install`, `ci-test`, and `validate` recipe names remain as aliase
 
 Generated output locations and signing-key handling are documented in [ARTIFACTS.md](ARTIFACTS.md). Do not add build output or captured data directly to a project source directory.
 
+## CI Workflow Maintenance
+
+The CI workflow pins GitHub Actions to immutable commit SHAs in `.github/workflows/integration-tests.yml`.
+When updating an action version tag (for example `v4` or `v5`), refresh the pinned SHA with:
+
+```powershell
+gh api repos/actions/<action-name>/commits/<tag> --jq .sha
+```
+
+Example:
+
+```powershell
+gh api repos/actions/checkout/commits/v4 --jq .sha
+```
+
+After changing pinned SHAs, run `just check` before opening a pull request.
+
 ## Pull Request Expectations
 
 - Keep changes scoped and easy to review.
