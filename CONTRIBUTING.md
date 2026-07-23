@@ -83,6 +83,16 @@ After changing pinned SHAs, run `just check` before opening a pull request.
 - Use descriptive commit messages.
 - Prefer small commits that can be reviewed independently.
 
+## AI-Assisted Contributions
+
+When using coding agents (Copilot, Codex, or similar), follow repository AI governance files:
+
+- `.github/copilot-instructions.md` for Copilot-specific behavior.
+- `AGENTS.md` for cross-agent repository rules.
+- `.agents/*.md` for component-scoped guidance.
+
+Agents should run the same validation commands documented above and include test notes in pull request summaries.
+
 ## Reporting Issues
 
 Please use the issue templates and include:
