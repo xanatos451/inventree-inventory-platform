@@ -6,7 +6,8 @@
 
 # Editor and agent-local metadata
 /.vscode/
-/.agents/
+/.agents/*
+!/.agents/*.md
 
 # JavaScript dependencies and test caches
 **/node_modules/
