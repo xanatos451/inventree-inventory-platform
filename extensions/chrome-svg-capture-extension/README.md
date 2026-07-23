@@ -60,7 +60,7 @@ The extension controls the folder path relative to Chrome's configured download 
 1. Open `chrome://extensions`
 2. Enable Developer mode
 3. Click **Load unpacked**
-4. Select this folder: `chrome-svg-capture-extension`
+4. Select this folder: `extensions/chrome-svg-capture-extension`
 
 ## Notes
 

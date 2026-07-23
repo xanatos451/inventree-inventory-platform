@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Multi-Site Inventory Exporter",
+  "name": "Multi-Site Inventory Capture",
   "version": "1.0.0",
   "description": "Capture supplier-page data and submit raw captures to the Multi-Site Supplier Importer plugin for InvenTree.",
   "permissions": [

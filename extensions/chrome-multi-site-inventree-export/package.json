@@ -2,7 +2,7 @@
   "name": "chrome-multi-site-inventree-export",
   "version": "1.0.0",
   "private": true,
-  "description": "Integration tests for the Multi-Site Inventory Exporter Chrome extension",
+  "description": "Integration tests for the Multi-Site Inventory Capture browser extension",
   "scripts": {
     "validate": "npm run test:syntax && npm run test:integration",
     "test:syntax": "node --check background.js && node --check popup.js",

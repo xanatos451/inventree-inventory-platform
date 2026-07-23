@@ -1,6 +1,6 @@
 # Local artifacts and generated data
 
-Generated packages, reports, signed extension builds, and local output belong under the repository-level `.artifacts/` directory. The entire directory is ignored by Git.
+Generated packages, reports, signed extension bundles, and local output belong under the repository-level `.artifacts/` directory. The entire directory is ignored by Git.
 
 ```text
 .artifacts/

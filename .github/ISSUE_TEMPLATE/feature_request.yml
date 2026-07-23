@@ -27,10 +27,10 @@ body:
       description: Any alternatives or tradeoffs considered.
 
   - type: input
-    id: extension
+    id: component
     attributes:
-      label: Target Extension
-      placeholder: chrome-multi-site-inventree-export
+      label: Target Component
+      placeholder: plugins/inventree-multi-site-importer
     validations:
       required: true
 

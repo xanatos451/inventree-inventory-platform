@@ -40,11 +40,11 @@ body:
       required: true
 
   - type: input
-    id: extension
+    id: component
     attributes:
-      label: Extension
-      description: Which extension folder is affected?
-      placeholder: chrome-multi-site-inventree-export
+      label: Affected Component
+      description: Which component is affected (capture extension, SVG extension, importer plugin, scripts)?
+      placeholder: plugins/inventree-multi-site-importer
     validations:
       required: true
 
