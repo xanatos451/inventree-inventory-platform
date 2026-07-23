@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inventree-multi-site-importer"
+dynamic = ["version"]
+description = "InvenTree plugin for staging and mapping supplier captures from the Multi-Site Inventory Exporter browser extension"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "xanatos451" }]
+dependencies = []
+
+[project.entry-points."inventree_plugins"]
+MultiSiteImporter = "inventree_multi_site_importer.core:MultiSiteImporterPlugin"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["inventree_multi_site_importer*"]
+
+[tool.setuptools.package-data]
+inventree_multi_site_importer = ["templates/**/*.html"]
+
+[tool.setuptools.dynamic]
+version = { attr = "inventree_multi_site_importer.PLUGIN_VERSION" }

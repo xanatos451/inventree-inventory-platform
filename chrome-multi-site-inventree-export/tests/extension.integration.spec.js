@@ -5,375 +5,229 @@ const http = require("http");
 const { chromium, test, expect } = require("@playwright/test");
 
 const extensionPath = path.resolve(__dirname, "..");
-
 let context;
-let page;
 let extensionId;
-let mockInventreeBaseUrl;
-let mockInventreeServer;
+let server;
+let baseUrl;
+let submissions = [];
 
-async function startMockInventreeServer() {
-  const categories = [
-    { pk: 12, name: "Hardware", parent: null },
-    { pk: 21, name: "Fasteners", parent: 12 },
-    { pk: 37, name: "Washers", parent: 21 },
-  ];
-
-  const server = http.createServer((req, res) => {
-    const reqUrl = new URL(req.url, "http://127.0.0.1");
-    if (req.method === "GET" && reqUrl.pathname === "/api/part/category/") {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ count: categories.length, next: null, previous: null, results: categories }));
-      return;
-    }
-
-    res.writeHead(404, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ detail: "Not found" }));
-  });
-
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  const port = typeof address === "object" && address ? address.port : 0;
-  return {
-    server,
-    baseUrl: `http://127.0.0.1:${port}`,
-  };
-}
-
-async function openPopupPage() {
-  const popupPage = await context.newPage();
-  await popupPage.goto(`chrome-extension://${extensionId}/popup.html`);
-  await expect(popupPage.getByRole("heading", { name: "Multi-Site Inventory Exporter" })).toBeVisible();
-  return popupPage;
-}
-
-async function openDetailsById(popupPage, id) {
-  const details = popupPage.locator(`#${id}`);
-  if (await details.count()) {
-    const isOpen = await details.evaluate((node) => node.hasAttribute("open"));
-    if (!isOpen) {
-      await details.locator(":scope > summary").click();
-      await expect(details).toHaveAttribute("open", "");
-    }
-  }
-}
-
-async function openSettingsPanel(popupPage) {
-  await openDetailsById(popupPage, "settingsPanel");
-}
-
-async function openLinkedPagesPanel(popupPage) {
-  await openDetailsById(popupPage, "linkedPagesPanel");
-}
-
-async function openDirectDefaultsPanel(popupPage) {
-  await openSettingsPanel(popupPage);
-  await openDetailsById(popupPage, "directDefaultsPanel");
-}
-
-async function openConnectionPathsPanel(popupPage) {
-  await openSettingsPanel(popupPage);
-  await openDetailsById(popupPage, "connectionPathsPanel");
-}
-
-async function openHeaderMappingPanel(popupPage) {
-  await openSettingsPanel(popupPage);
-  await openDetailsById(popupPage, "headerMappingPanel");
+async function openPopup(query = "") {
+  const page = await context.newPage();
+  await page.goto(`chrome-extension://${extensionId}/popup.html${query}`);
+  await expect(page.getByRole("heading", { name: "Multi-Site Inventory Capture" })).toBeVisible();
+  return page;
 }
 
 test.beforeAll(async () => {
-  const mockServer = await startMockInventreeServer();
-  mockInventreeServer = mockServer.server;
-  mockInventreeBaseUrl = mockServer.baseUrl;
+  server = http.createServer((req, res) => {
+    if (req.method === "GET" && req.url === "/mock-mcmaster-detail") {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end(`<html><body><main>
+        <nav aria-label="breadcrumb"><a>Fasteners</a><span>Screws</span></nav>
+        <h1>Alloy Steel Socket Head Screw 91251A542</h1>
+        <p>High-strength socket head screw.</p>
+        <table><tr><th>Thread Size</th><td>1/4-20</td></tr><tr><th>Length</th><td>2 in.</td></tr></table>
+      </main></body></html>`);
+      return;
+    }
+    if (req.method === "POST" && req.url === "/plugin/multi-site-importer/captures/") {
+      let body = "";
+      req.on("data", (chunk) => { body += chunk; });
+      req.on("end", () => {
+        submissions.push({ body: JSON.parse(body), authorization: req.headers.authorization });
+        res.writeHead(201, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ capture_id: 42, status: "queued", row_count: 1, workspace_path: "/plugin/multi-site-importer/captures/42/workspace/" }));
+      });
+      return;
+    }
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ detail: "Not found" }));
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  baseUrl = `http://127.0.0.1:${server.address().port}`;
 
-  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "inventory-exporter-e2e-"));
-
+  const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "inventory-capture-e2e-"));
   context = await chromium.launchPersistentContext(userDataDir, {
     channel: "chromium",
     headless: false,
-    args: [
-      `--disable-extensions-except=${extensionPath}`,
-      `--load-extension=${extensionPath}`,
-    ],
+    args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`],
   });
-
-  let [serviceWorker] = context.serviceWorkers();
-  if (!serviceWorker) {
-    serviceWorker = await context.waitForEvent("serviceworker");
-  }
-
-  const serviceWorkerUrl = serviceWorker.url();
-  extensionId = serviceWorkerUrl.split("/")[2];
-
-  page = await context.newPage();
+  let [worker] = context.serviceWorkers();
+  if (!worker) worker = await context.waitForEvent("serviceworker");
+  extensionId = worker.url().split("/")[2];
+  const page = await context.newPage();
   await page.goto("https://example.com/");
 });
 
 test.afterAll(async () => {
   await context?.close();
-  if (mockInventreeServer) {
-    await new Promise((resolve) => mockInventreeServer.close(resolve));
-  }
+  await new Promise((resolve) => server.close(resolve));
 });
 
-test("loads popup UI and source options", async () => {
-  const popupPage = await openPopupPage();
-
-  await expect(popupPage.locator("#sourceMode")).toContainText("Auto Detect");
-  await expect(popupPage.locator("#sourceMode")).toContainText("McMaster-Carr");
-  await expect(popupPage.locator("#sourceMode")).toContainText("Bolt Depot");
-  await expect(popupPage.locator("#sourceMode")).toContainText("Amazon Orders");
-
-  await popupPage.close();
+test("shows capture-only workflow without direct-sync controls", async () => {
+  const page = await openPopup();
+  await expect(page.locator("#sourceMode")).toContainText("McMaster-Carr");
+  await expect(page.locator("#captureProfile")).toContainText("List/Table Items + Detail Pages");
+  await expect(page.getByRole("button", { name: "Submit to Import Queue" })).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("Direct InvenTree API");
+  await expect(page.locator("body")).not.toContainText("Header Mapping Hints");
+  await page.close();
 });
 
-test("supports larger full-view mode in a tab", async () => {
-  const fullPage = await context.newPage();
-  await fullPage.goto(`chrome-extension://${extensionId}/popup.html?mode=full`);
-
-  await expect(fullPage.locator("body")).toHaveClass(/full-mode/);
-  await expect(fullPage.locator("#openFullPageBtn")).toBeDisabled();
-  await expect(fullPage.locator("#preview")).toBeVisible();
-
-  await fullPage.close();
+test("supports a larger tab view", async () => {
+  const page = await openPopup("?mode=full");
+  await expect(page.locator("body")).toHaveClass(/full-mode/);
+  await expect(page.locator("#openFullPageBtn")).toBeDisabled();
+  await page.close();
 });
 
-test("saves and reloads settings from extension storage", async () => {
-  const popupPage = await openPopupPage();
-  await openSettingsPanel(popupPage);
-  await openConnectionPathsPanel(popupPage);
-  await openLinkedPagesPanel(popupPage);
-
-  await popupPage.fill("#inventreeUrl", "https://inventree.test");
-  await popupPage.fill("#inventreeToken", "token-123");
-  await popupPage.fill("#inventreeEndpointPath", "/api/plugin/product-import/");
-  await popupPage.selectOption("#sourceMode", "amazon");
-  await popupPage.fill("#maxLinkedPages", "7");
-
-  await popupPage.click("#saveSettingsBtn");
-  await expect(popupPage.locator("#status")).toContainText("Settings and templates saved.");
-
-  await popupPage.reload();
-  await openSettingsPanel(popupPage);
-  await openConnectionPathsPanel(popupPage);
-  await openLinkedPagesPanel(popupPage);
-
-  await expect(popupPage.locator("#inventreeUrl")).toHaveValue("https://inventree.test");
-  await expect(popupPage.locator("#inventreeToken")).toHaveValue("token-123");
-  await expect(popupPage.locator("#inventreeEndpointPath")).toHaveValue("/api/plugin/product-import/");
-  await expect(popupPage.locator("#sourceMode")).toHaveValue("amazon");
-  await expect(popupPage.locator("#maxLinkedPages")).toHaveValue("7");
-
-  await popupPage.close();
+test("saves only the plugin connection and capture settings", async () => {
+  const page = await openPopup();
+  await page.locator("#settingsPanel").evaluate((node) => { node.open = true; });
+  await page.locator("#linkedPagesPanel").evaluate((node) => { node.open = true; });
+  await page.fill("#inventreeUrl", baseUrl);
+  await page.fill("#inventreeToken", "capture-token");
+  await page.selectOption("#sourceMode", "amazon");
+  await page.selectOption("#captureProfile", "list-details");
+  await page.fill("#maxLinkedPages", "7");
+  await page.click("#saveSettingsBtn");
+  await expect(page.locator("#status")).toContainText("Connection settings saved");
+  await page.reload();
+  await expect(page.locator("#inventreeUrl")).toHaveValue(baseUrl);
+  await expect(page.locator("#sourceMode")).toHaveValue("amazon");
+  await expect(page.locator("#captureProfile")).toHaveValue("list-details");
+  await expect(page.locator("#maxLinkedPages")).toHaveValue("7");
+  await page.close();
 });
 
-test("sanitizes saved settings in background handler", async () => {
-  const popupPage = await openPopupPage();
-
-  const result = await popupPage.evaluate(async () => {
-    const save = await new Promise((resolve) => {
-      chrome.runtime.sendMessage(
-        {
-          type: "saveSettings",
-          settings: {
-            sourceMode: "not-a-provider",
-            maxLinkedPages: 999,
-            inventreeEndpointPath: "api/custom-import",
-          },
-        },
-        resolve,
-      );
+test("submits a versioned raw capture to the plugin queue", async () => {
+  submissions = [];
+  const page = await openPopup();
+  await page.evaluate(async ({ baseUrl }) => {
+    await chrome.storage.local.set({
+      inventreeUrl: baseUrl,
+      inventreeToken: "capture-token",
+      inventreeEndpointPath: "/plugin/multi-site-importer/captures/",
+      lastCapture: {
+        source: "boltdepot", pageType: "product-table", capturedAt: "2026-07-22T12:00:00.000Z",
+        pageTitle: "Bolts", pageUrl: "https://boltdepot.com/Bolts.aspx", headers: ["Part Number"],
+        rows: [{ "Part Number": "BD-1" }], pagesScraped: 1,
+      },
     });
+  }, { baseUrl });
+  await page.reload();
+  await page.click("#submitBtn");
+  await expect(page.locator("#status")).toContainText("Queued 1 row(s). Capture #42.");
+  expect(submissions).toHaveLength(1);
+  expect(submissions[0].authorization).toBe("Token capture-token");
+  expect(submissions[0].body.contract_version).toBe("1.0");
+  expect(submissions[0].body.capture_profile).toBe("auto");
+  expect(submissions[0].body.payload.rows).toEqual([{ "Part Number": "BD-1" }]);
+  expect(submissions[0].body.payload).not.toHaveProperty("items");
+  await expect(page.getByRole("button", { name: "Open Import Field Workspace" })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Open Import Field Workspace" })).toBeVisible();
+  const storedWorkspaceUrl = await page.evaluate(async () => {
+    const stored = await chrome.storage.local.get("lastWorkspaceUrl");
+    return stored.lastWorkspaceUrl;
+  });
+  expect(storedWorkspaceUrl).toBe(`${baseUrl}/plugin/multi-site-importer/captures/42/workspace/`);
+  await page.close();
+});
 
-    const state = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: "getState" }, resolve);
-    });
+test("rejects queue submission without a capture", async () => {
+  const page = await openPopup();
+  await page.evaluate(() => chrome.storage.local.remove("lastCapture"));
+  await page.reload();
+  await page.click("#submitBtn");
+  await expect(page.locator("#status")).toContainText("No captured rows");
+  await page.close();
+});
 
-    return { save, state };
+test("reports unsupported pages during capture", async () => {
+  const page = await openPopup();
+  await page.selectOption("#sourceMode", "auto");
+  await page.click("#captureBtn");
+  await expect(page.locator("#status")).toContainText("Unsupported page");
+  await page.close();
+});
+
+test("enriches McMaster table rows from item pages while preserving list taxonomy", async () => {
+  await context.route("https://www.mcmaster.com/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/mock-category-frame") {
+      await route.fulfill({ contentType: "text/html", body: `
+        <html><body><main>
+          <nav aria-label="breadcrumb"><a>Hardware</a><span>Fasteners</span></nav>
+          <h1>Socket Head Screws</h1><p>Choose a screw.</p>
+          <table><thead><tr><th>Part Number</th><th>Material</th><th>Thread</th><th>Length</th></tr></thead>
+            <tbody><tr><td><a href="${baseUrl}/mock-mcmaster-detail">91251A542</a></td><td>Alloy Steel</td><td>1/4-20</td><td>2 in.</td></tr></tbody>
+          </table>
+        </main></body></html>` });
+      return;
+    }
+    await route.fulfill({ contentType: "text/html", body: `
+      <html><body><h1>McMaster-Carr</h1><iframe src="/mock-category-frame"></iframe></body></html>` });
   });
 
-  expect(result.save?.ok).toBeTruthy();
-  expect(result.state?.ok).toBeTruthy();
-  expect(result.state.settings.sourceMode).toBe("auto");
-  expect(result.state.settings.maxLinkedPages).toBe(80);
-  expect(result.state.settings.inventreeEndpointPath).toBe("/api/custom-import");
-
-  await popupPage.close();
+  const popup = await openPopup();
+  await popup.selectOption("#sourceMode", "auto");
+  const supplier = await context.newPage();
+  await supplier.goto("https://www.mcmaster.com/products/socket-head-screws");
+  await supplier.bringToFront();
+  await popup.evaluate(() => document.querySelector("#captureBtn").click());
+  await expect(popup.locator("#status")).toContainText("Captured 1 row(s)");
+  const capture = await popup.evaluate(() => chrome.storage.local.get("lastCapture").then((data) => data.lastCapture));
+  expect(capture.pageType).toBe("category-table");
+  expect(capture.pagesScraped).toBe(2);
+  expect(capture.rows[0].ProductDetailThreadSize).toBe("1/4-20");
+  expect(capture.rows[0].ProductListBreadcrumbs).toContain("Hardware");
+  expect(capture.rows[0].ProductDetailBreadcrumbs).toContain("Fasteners");
+  const progress = await popup.evaluate(() => chrome.storage.local.get("captureProgress").then((data) => data.captureProgress));
+  expect(progress.status).toBe("complete");
+  expect(progress.completed).toBe(1);
+  expect(progress.total).toBe(1);
+  await supplier.close();
+  await popup.close();
+  await context.unroute("https://www.mcmaster.com/**");
 });
 
-test("shows validation error when sending without capture", async () => {
-  const popupPage = await openPopupPage();
-
-  await popupPage.click("#sendBtn");
-  await expect(popupPage.locator("#status")).toContainText("No captured rows. Capture a page first.");
-
-  await popupPage.close();
-});
-
-test("shows unsupported page error for capture on non-supported site", async () => {
-  const popupPage = await openPopupPage();
-
-  await popupPage.click("#captureBtn");
-  await expect(popupPage.locator("#status")).toContainText("Unsupported page");
-
-  await popupPage.close();
-});
-
-test("shows provider-specific error when source is forced to McMaster", async () => {
-  const popupPage = await openPopupPage();
-
-  await popupPage.selectOption("#sourceMode", "mcmaster");
-  await popupPage.click("#captureBtn");
-  await expect(popupPage.locator("#status")).toContainText("Active tab is not a McMaster-Carr page.");
-
-  await popupPage.close();
-});
-
-test("previews zero linked pages on non-supported site", async () => {
-  const popupPage = await openPopupPage();
-  await openLinkedPagesPanel(popupPage);
-
-  await popupPage.click("#previewLinksBtn");
-  await expect(popupPage.locator("#status")).toContainText("Linked page preview loaded (0 found).");
-  await expect(popupPage.locator("#linkedPagesSummary")).toContainText("Items/pages: 0. Visible: 0. Selected: 0.");
-
-  await popupPage.close();
-});
-
-test("opens help docs and shows quick start content", async () => {
-  const popupPage = await openPopupPage();
-
-  await popupPage.click("#helpBtn");
-  await expect(popupPage.locator("#helpPanel")).toHaveAttribute("open", "");
-  await expect(popupPage.locator("#helpPanel")).toContainText("Quick Start");
-  await expect(popupPage.locator("#helpPanel")).toContainText("Direct Mode Dry-Run Validation");
-
-  await popupPage.close();
-});
-
-test("fetches existing categories and updates default category picker", async () => {
-  const popupPage = await openPopupPage();
-  await openDirectDefaultsPanel(popupPage);
-
-  await popupPage.fill("#inventreeUrl", mockInventreeBaseUrl);
-  await popupPage.fill("#inventreeToken", "token-abc");
-  await popupPage.click("#fetchCategoriesBtn");
-
-  await expect(popupPage.locator("#status")).toContainText("Fetched 3 categories.");
-  await expect(popupPage.locator("#existingCategorySelect option")).toHaveCount(4);
-  await expect(popupPage.locator("#existingCategorySelect")).toContainText("Hardware > Fasteners (#21)");
-
-  await popupPage.selectOption("#existingCategorySelect", "21");
-  await expect(popupPage.locator("#inventreeDefaultCategoryId")).toHaveValue("21");
-
-  await popupPage.close();
-});
-
-test("previews category assignment plan with existing and create steps", async () => {
-  const popupPage = await openPopupPage();
-
-  await popupPage.evaluate(async ({ mockInventreeBaseUrl }) => {
-    const mappingTemplates = {
-      "boltdepot:order-details": {
-        name: { sourceField: "Name", regex: "" },
-        description: { sourceField: "", regex: "" },
-        quantity: { sourceField: "", regex: "" },
-        category: { sourceField: "Category", regex: "" },
-        subcategory: { sourceField: "Subcategory", regex: "" },
-        variant: { sourceField: "", regex: "" },
-      },
-    };
-
-    await new Promise((resolve) => {
-      chrome.runtime.sendMessage(
-        {
-          type: "saveSettings",
-          settings: {
-            inventreeSyncMode: "direct",
-            inventreeUrl: mockInventreeBaseUrl,
-            inventreeToken: "token-abc",
-            inventreeDefaultCategoryId: "12",
-            enableCategoryBuilder: true,
-            mappingTemplates,
-          },
-        },
-        resolve,
-      );
-    });
-
-    await chrome.storage.local.set({
-      lastCapture: {
-        source: "boltdepot",
-        pageType: "order-details",
-        capturedAt: "2026-01-01T00:00:00.000Z",
-        pageTitle: "Order 2556509",
-        pageUrl: "https://boltdepot.com/Account/Order-Details?orderId=2556509",
-        headers: ["Name", "Category", "Subcategory"],
-        rows: [
-          {
-            Name: "Hex Cap Screw",
-            Category: "Fasteners",
-            Subcategory: "Nuts",
-          },
-          {
-            Name: "Flat Washer",
-            Category: "Fasteners",
-            Subcategory: "Washers",
-          },
-        ],
-        pagesScraped: 1,
-      },
-    });
-  }, { mockInventreeBaseUrl });
-
-  await popupPage.reload();
-  await openDirectDefaultsPanel(popupPage);
-  await openHeaderMappingPanel(popupPage);
-  await popupPage.selectOption('select[data-map-source="name"]', "Name");
-  await popupPage.selectOption('select[data-map-source="category"]', "Category");
-  await popupPage.selectOption('select[data-map-source="subcategory"]', "Subcategory");
-  await popupPage.click("#previewCategoryAssignmentsBtn");
-
-  await expect(popupPage.locator("#status")).toContainText("Category preview ready for 2 item(s).");
-  await expect(popupPage.locator("#status")).toContainText("Planned category creates: 1.");
-  await expect(popupPage.locator("#categoryPreviewDetails")).toHaveClass(/visible/);
-  await expect(popupPage.locator("#categoryPreviewSummary")).toContainText("Would create segments: 1");
-  await expect(popupPage.locator("#categoryPreviewList")).toContainText("existing: Fasteners");
-  await expect(popupPage.locator("#categoryPreviewList")).toContainText("create: Nuts");
-  await expect(popupPage.locator("#categoryPreviewList")).toContainText("Hardware > Fasteners > Nuts");
-
-  await popupPage.close();
-});
-
-test("direct mode dry-run reports missing required settings", async () => {
-  const popupPage = await openPopupPage();
-  await openDirectDefaultsPanel(popupPage);
-
-  await popupPage.selectOption("#inventreeSyncMode", "direct");
-  await popupPage.fill("#inventreeUrl", "");
-  await popupPage.fill("#inventreeToken", "");
-  await popupPage.fill("#inventreeDefaultCategoryId", "");
-  await popupPage.click("#dryRunBtn");
-
-  await expect(popupPage.locator("#status")).toContainText("Dry-run found issues");
-  await expect(popupPage.locator("#status")).toContainText("InvenTree Base URL");
-  await expect(popupPage.locator("#status")).toContainText("Default Category ID");
-  await expect(popupPage.locator("#status")).toContainText("PASS: Default Supplier ID");
-  await expect(popupPage.locator("#dryRunDetails")).toHaveClass(/visible/);
-  await expect(popupPage.locator("#dryRunDetailsList")).toContainText("FAIL: InvenTree Base URL");
-  await expect(popupPage.locator("#dryRunDetailsList")).toContainText("FAIL: Default Category ID");
-  await expect(popupPage.locator("#dryRunDetailsList")).toContainText("PASS: Default Supplier ID");
-
-  await popupPage.close();
-});
-
-test("dry-run requires direct mode", async () => {
-  const popupPage = await openPopupPage();
-
-  await popupPage.selectOption("#inventreeSyncMode", "plugin");
-  await popupPage.click("#dryRunBtn");
-  await expect(popupPage.locator("#status")).toContainText("Dry-run found issues");
-  await expect(popupPage.locator("#status")).toContainText("Sync mode");
-
-  await popupPage.close();
+test("captures a McMaster single-item page directly", async () => {
+  await context.route("https://www.mcmaster.com/**", (route) => route.fulfill({ contentType: "text/html", body: `
+    <html><body><main>
+      <nav aria-label="breadcrumb"><ul>
+        <li><a>Hardware</a></li><li><a>Hardware</a></li>
+        <li><a>Screws and Bolts</a></li><li><span aria-current="page">90126A029</span></li>
+      </ul></nav>
+      <h1>18-8 Stainless Steel Screw 90126A029, M2 x 0.4 mm Thread Size, 4 mm Long | McMaster-Carr</h1><p>General purpose screw.</p>
+      <img src="/mvD/gfx/IndustrialInfo/industrial-information-icon.svg?ver=ImageNotFound" alt="Industrial information">
+      <img src="/mvD/Contents/gfx/ImageCache/901/90126A029.png?ver=ImageNotFound" alt="Image of product">
+      <table>
+        <tr><th>For Screw Size</th><td>1/4 in.</td></tr><tr><th>Material</th><td>Steel</td></tr>
+        <tr><th>Countersink Angle</th><td>90Â°</td></tr>
+        <tr><th>U.S.â€“Mexicoâ€“Canada Agreement</th><td>Yes</td></tr>
+      </table>
+    </main></body></html>` }));
+  const popup = await openPopup();
+  await popup.selectOption("#sourceMode", "auto");
+  const supplier = await context.newPage();
+  await supplier.goto("https://www.mcmaster.com/90126A029");
+  await supplier.bringToFront();
+  await popup.evaluate(() => document.querySelector("#captureBtn").click());
+  await expect(popup.locator("#status")).toContainText("Captured 1 row(s)");
+  const capture = await popup.evaluate(() => chrome.storage.local.get("lastCapture").then((data) => data.lastCapture));
+  expect(capture.pageType).toBe("product-detail");
+  expect(capture.pagesScraped).toBe(1);
+  expect(capture.rows[0].McMasterPartNumber).toBe("90126A029");
+  expect(capture.rows[0].ProductDetailSpecs).toContain("Material: Steel");
+  expect(capture.rows[0].ProductDetailThreadSize).toBe("M2 x 0.4 mm");
+  expect(capture.rows[0].ProductDetailLength).toBe("4 mm");
+  expect(capture.rows[0].ProductDetailBreadcrumbs).toBe("Hardware > Screws and Bolts > 90126A029");
+  expect(capture.rows[0].Spec_Countersink_Angle).toBe("90°");
+  expect(capture.rows[0].Spec_U_S_Mexico_Canada_Agreement).toBe("Yes");
+  expect(capture.rows[0].RowImageURL).toContain("/ImageCache/901/90126A029.png");
+  expect(capture.rows[0].RowImageURL).not.toContain("ImageNotFound");
+  await supplier.close();
+  await popup.close();
+  await context.unroute("https://www.mcmaster.com/**");
 });

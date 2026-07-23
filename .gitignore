@@ -1,2 +1,19 @@
-# Local build artifacts
+# Consolidated build, package, report, and signing output
+/.artifacts/
+
+# Legacy local output location (kept ignored during migration)
 /tmp/
+
+# Editor and agent-local metadata
+/.vscode/
+/.agents/
+
+# JavaScript dependencies and test caches
+**/node_modules/
+
+# Python caches and transient packaging state
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+**/build/
+**/dist/

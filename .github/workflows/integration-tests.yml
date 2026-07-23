@@ -1,4 +1,4 @@
-name: Extension Integration Tests
+name: Extension and InvenTree Plugin Tests
 
 on:
   push:
@@ -6,16 +6,58 @@ on:
     paths:
       - "chrome-multi-site-inventree-export/**"
       - "chrome-svg-capture-extension/**"
+      - "inventree-multi-site-importer/**"
       - ".github/workflows/integration-tests.yml"
+      - "CONTRIBUTING.md"
   pull_request:
     branches: [main]
     paths:
       - "chrome-multi-site-inventree-export/**"
       - "chrome-svg-capture-extension/**"
+      - "inventree-multi-site-importer/**"
       - ".github/workflows/integration-tests.yml"
+      - "CONTRIBUTING.md"
+  workflow_dispatch:
 
 jobs:
-  test-extension:
+  security-scan:
+    name: Source secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Scan source for credential material
+        run: python scripts/check_secrets.py
+
+  javascript-syntax:
+    name: JavaScript syntax
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check capture extension scripts
+        working-directory: chrome-multi-site-inventree-export
+        run: npm run test:syntax
+
+      - name: Check SVG capture extension scripts
+        run: |
+          node --check chrome-svg-capture-extension/background.js
+          node --check chrome-svg-capture-extension/popup.js
+
+  extension-integration:
+    name: Capture extension integration (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -33,6 +75,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
+          cache-dependency-path: chrome-multi-site-inventree-export/package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -51,3 +95,54 @@ jobs:
       - name: Run integration tests (Windows)
         if: runner.os == 'Windows'
         run: npm run test:integration
+
+      - name: Upload Playwright diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-diagnostics-${{ matrix.os }}
+          path: |
+            .artifacts/playwright/report/
+            .artifacts/playwright/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  inventree-plugin:
+    name: InvenTree plugin contract (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    defaults:
+      run:
+        working-directory: inventree-multi-site-importer
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: inventree-multi-site-importer/pyproject.toml
+
+      - name: Build and verify distributable wheel
+        run: python scripts/build_plugin.py --clean
+
+      - name: Compile plugin sources
+        run: python -m compileall -q inventree_multi_site_importer
+
+      - name: Run capture-contract and mapping tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Upload plugin wheel
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: inventree-multi-site-importer-wheel
+          path: .artifacts/plugin/*.whl
+          if-no-files-found: error
+          retention-days: 14

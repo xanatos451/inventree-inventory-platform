@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Multi-Site Inventory Exporter",
   "version": "1.0.0",
-  "description": "Capture product data from supplier catalog pages (McMaster-Carr, Bolt Depot) and Amazon order pages and export to files or send to an InvenTree endpoint.",
+  "description": "Capture supplier-page data and submit raw captures to the Multi-Site Supplier Importer plugin for InvenTree.",
   "permissions": [
     "storage",
     "tabs",

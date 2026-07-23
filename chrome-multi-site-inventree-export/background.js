@@ -1,47 +1,48 @@
 const DEFAULT_SETTINGS = {
-  inventreeSyncMode: "plugin",
   inventreeUrl: "",
   inventreeToken: "",
-  inventreeEndpointPath: "/api/plugin/product-import/",
-  inventreePartApiPath: "/api/part/",
-  inventreeSupplierPartApiPath: "/api/company/part/",
-  inventreeStockItemApiPath: "/api/stock/",
-  inventreePartParameterApiPath: "/api/part/parameter/",
-  inventreeParameterTemplateApiPath: "/api/part/parameter/template/",
-  inventreeDefaultCategoryId: "",
-  enableCategoryBuilder: false,
-  inventreeDefaultSupplierId: "",
-  inventreeDefaultLocationId: "",
-  stockQuantityHeaderHint: "",
-  defaultStockQuantity: "",
-  mappingTemplatePathPattern: "",
-  syncSupplierParts: true,
-  syncStockRecords: false,
-  syncPartParameters: false,
-  autoCreateMissingParameterTemplates: false,
-  parameterMappingsText: "",
+  inventreeEndpointPath: "/plugin/multi-site-importer/captures/",
   sourceMode: "auto",
+  captureProfile: "auto",
   crawlLinkedPages: true,
-  maxLinkedPages: 20,
-  nameHeaderHint: "",
-  descriptionHeaderHint: "",
-  mpnHeaderHint: "",
-  supplierPnHeaderHint: "",
-  imageHeaderHint: "",
-  includeImageUrls: false,
-  uploadImagesIfSupported: false,
-  nameComposeFields: "",
-  nameComposeDelimiter: " - ",
-  globalImageSourceField: "",
-  partImageUploadPath: "/api/part/{id}/upload/",
-  partIdResponsePath: "",
-  existingMatchStrategy: "skip"
+  maxLinkedPages: 100
 };
 
 const MAPPING_TARGET_KEYS = ["name", "description", "quantity", "category", "subcategory", "variant", "notes"];
 
 const LAST_CAPTURE_KEY = "lastCapture";
 const LAST_SEND_RESPONSE_KEY = "lastSendResponse";
+const LAST_WORKSPACE_URL_KEY = "lastWorkspaceUrl";
+const CAPTURE_PROGRESS_KEY = "captureProgress";
+
+async function setCaptureProgress(progress) {
+  const state = {
+    status: String(progress?.status || "idle"),
+    completed: Number(progress?.completed || 0),
+    total: Number(progress?.total || 0),
+    message: String(progress?.message || ""),
+    updatedAt: new Date().toISOString()
+  };
+  await chrome.storage.local.set({ [CAPTURE_PROGRESS_KEY]: state });
+
+  let badgeText = "";
+  let badgeColor = "#176f91";
+  if (state.status === "running") {
+    badgeText = state.total > 0 ? `${state.completed}/${state.total}` : "…";
+  } else if (state.status === "complete") {
+    badgeText = "✓";
+    badgeColor = "#237a3b";
+  } else if (state.status === "failed") {
+    badgeText = "!";
+    badgeColor = "#a12c24";
+  }
+  await chrome.action.setBadgeBackgroundColor({ color: badgeColor });
+  await chrome.action.setBadgeText({ text: badgeText });
+  await chrome.action.setTitle({
+    title: state.message || "Multi-Site Inventory Exporter"
+  });
+  return state;
+}
 
 chrome.runtime.onInstalled.addListener(async () => {
   const existing = await chrome.storage.local.get(Object.keys(DEFAULT_SETTINGS));
@@ -67,11 +68,13 @@ async function handleMessage(message) {
   switch (message?.type) {
     case "getState": {
       const settings = await getSettings();
-      const data = await chrome.storage.local.get([LAST_CAPTURE_KEY]);
+      const data = await chrome.storage.local.get([LAST_CAPTURE_KEY, LAST_WORKSPACE_URL_KEY, CAPTURE_PROGRESS_KEY]);
       return {
         ok: true,
         settings,
-        lastCapture: data[LAST_CAPTURE_KEY] || null
+        lastCapture: data[LAST_CAPTURE_KEY] || null,
+        lastWorkspaceUrl: data[LAST_WORKSPACE_URL_KEY] || "",
+        captureProgress: data[CAPTURE_PROGRESS_KEY] || null
       };
     }
 
@@ -85,9 +88,27 @@ async function handleMessage(message) {
       const incoming = sanitizeSettings(message?.settings || {});
       const persisted = await getSettings();
       const merged = { ...persisted, ...incoming };
-      const capture = await captureCurrentTabData(merged, message?.selectedChildLinks || []);
-      await chrome.storage.local.set({ [LAST_CAPTURE_KEY]: capture });
-      return { ok: true, capture };
+      await setCaptureProgress({
+        status: "running",
+        message: "Preparing supplier capture…"
+      });
+      try {
+        const capture = await captureCurrentTabData(merged, message?.selectedChildLinks || []);
+        await chrome.storage.local.set({ [LAST_CAPTURE_KEY]: capture });
+        await setCaptureProgress({
+          status: "complete",
+          completed: Number(capture.linkedPagesCrawled || capture.pagesScraped || 1),
+          total: Number(capture.linkedPagesCrawled || capture.pagesScraped || 1),
+          message: `Capture complete: ${capture.rows?.length || 0} row(s).`
+        });
+        return { ok: true, capture };
+      } catch (error) {
+        await setCaptureProgress({
+          status: "failed",
+          message: `Capture failed: ${String(error?.message || error)}`
+        });
+        throw error;
+      }
     }
 
     case "previewLinkedPages": {
@@ -114,10 +135,10 @@ async function handleMessage(message) {
       let mimeType;
 
       if (format === "json") {
-        payload = buildExportPayload(message.capture, hints);
+        payload = JSON.stringify(buildRawCapture(message.capture), null, 2);
         mimeType = "application/json";
       } else {
-        payload = buildCsvText(message.capture, hints);
+        payload = buildRawCaptureCsv(message.capture);
         mimeType = "text/csv";
       }
 
@@ -132,61 +153,7 @@ async function handleMessage(message) {
       return { ok: true, filename };
     }
 
-    case "previewMappedItems": {
-      const capture = message?.capture;
-      if (!capture?.rows?.length) {
-        return { ok: false, error: "No rows available to preview." };
-      }
-
-      const incoming = sanitizeSettings(message?.settings || {});
-      const persisted = await getSettings();
-      const merged = { ...persisted, ...incoming };
-      const exportObj = buildExportObject(capture, merged);
-      return {
-        ok: true,
-        templateKey: getTemplateKey(capture, merged),
-        items: exportObj.items.slice(0, 8)
-      };
-    }
-
-    case "previewCategoryAssignments": {
-      const capture = message?.capture;
-      if (!capture?.rows?.length) {
-        return { ok: false, error: "No rows available to preview." };
-      }
-
-      const incoming = sanitizeSettings(message?.settings || {});
-      const persisted = await getSettings();
-      const merged = { ...persisted, ...incoming };
-      if (!merged.inventreeUrl) {
-        return { ok: false, error: "InvenTree Base URL is required." };
-      }
-      if (!merged.inventreeToken) {
-        return { ok: false, error: "API token is required." };
-      }
-      const categoryId = parsePositiveInt(merged.inventreeDefaultCategoryId);
-      if (!categoryId) {
-        return { ok: false, error: "Default Category ID is required for category preview." };
-      }
-
-      return await previewCategoryAssignments(capture, merged, categoryId);
-    }
-
-    case "fetchInventreeCategories": {
-      const incoming = sanitizeSettings(message?.settings || {});
-      const persisted = await getSettings();
-      const merged = { ...persisted, ...incoming };
-      if (!merged.inventreeUrl) {
-        return { ok: false, error: "InvenTree Base URL is required." };
-      }
-      if (!merged.inventreeToken) {
-        return { ok: false, error: "API token is required." };
-      }
-      const categories = await fetchInventreeCategories(merged);
-      return { ok: true, categories };
-    }
-
-    case "sendToInventree": {
+    case "submitCapture": {
       const capture = message?.capture;
       if (!capture?.rows?.length) {
         return { ok: false, error: "No rows available to send." };
@@ -204,41 +171,12 @@ async function handleMessage(message) {
         return { ok: false, error: "API token is required." };
       }
 
-      const syncMode = merged.inventreeSyncMode === "direct" ? "direct" : "plugin";
-      const result = syncMode === "direct"
-        ? await sendDirectToInventree(capture, merged)
-        : await sendToInventreePluginEndpoint(capture, merged);
-
+      const result = await submitCaptureToPlugin(capture, merged);
+      if (result.ok && result.workspacePath) {
+        result.workspaceUrl = new URL(result.workspacePath, merged.inventreeUrl).toString();
+        await chrome.storage.local.set({ [LAST_WORKSPACE_URL_KEY]: result.workspaceUrl });
+      }
       return result;
-    }
-
-    case "dryRunDirectSync": {
-      const incoming = sanitizeSettings(message?.settings || {});
-      const persisted = await getSettings();
-      const merged = { ...persisted, ...incoming };
-      return await runDirectSyncDryRun(merged, message?.capture);
-    }
-
-    case "testPartIdPath": {
-      const settings = sanitizeSettings(message?.settings || {});
-      const state = await chrome.storage.local.get([LAST_SEND_RESPONSE_KEY]);
-      const saved = state[LAST_SEND_RESPONSE_KEY];
-      if (!saved?.bodyText) {
-        return { ok: false, error: "No saved API response yet. Send once, then test path." };
-      }
-
-      const parsed = tryParseJson(saved.bodyText);
-      if (!parsed) {
-        return { ok: false, error: "Last response is not valid JSON." };
-      }
-
-      const partIds = extractIdsByPath(parsed, settings.partIdResponsePath);
-      return {
-        ok: true,
-        partIds,
-        responseStatus: saved.status,
-        endpoint: saved.endpoint
-      };
     }
 
     default:
@@ -246,17 +184,30 @@ async function handleMessage(message) {
   }
 }
 
-async function sendToInventreePluginEndpoint(capture, merged) {
-  const payload = buildExportObject(capture, merged);
-  const filtered = await applyExistingMatchStrategy(payload.items, merged);
-  payload.items = filtered.items;
-  payload.item_count = payload.items.length;
-  payload.options = {
-    existing_match_strategy: merged.existingMatchStrategy,
-    skipped_existing: filtered.skippedExisting,
-    matched_for_update: filtered.matchedForUpdate
+async function submitCaptureToPlugin(capture, merged) {
+  const rawCapture = {
+    contract_version: "1.0",
+    capture_profile: String(capture.captureProfile || "auto"),
+    source: String(capture.source || "unknown"),
+    page_type: String(capture.pageType || ""),
+    captured_at: capture.capturedAt || new Date().toISOString(),
+    page_title: String(capture.pageTitle || ""),
+    page_url: String(capture.pageUrl || ""),
+    headers: Array.isArray(capture.headers) ? capture.headers : [],
+    rows: Array.isArray(capture.rows) ? capture.rows : [],
+    pages_scraped: Number(capture.pagesScraped || 1)
   };
-  const url = new URL(merged.inventreeEndpointPath || "/api/plugin/product-import/", merged.inventreeUrl).toString();
+  const payload = {
+    contract_version: rawCapture.contract_version,
+    capture_profile: rawCapture.capture_profile,
+    source: rawCapture.source,
+    page_type: rawCapture.page_type,
+    page_title: rawCapture.page_title,
+    page_url: rawCapture.page_url,
+    captured_at: rawCapture.captured_at,
+    payload: rawCapture
+  };
+  const url = new URL(merged.inventreeEndpointPath || "/plugin/multi-site-importer/captures/", merged.inventreeUrl).toString();
 
   const response = await fetch(url, {
     method: "POST",
@@ -285,41 +236,13 @@ async function sendToInventreePluginEndpoint(capture, merged) {
     };
   }
 
-  let uploadedImages = 0;
-  let skippedImages = 0;
-  let imageUploadNote = "";
-
-  if (merged.uploadImagesIfSupported && merged.includeImageUrls) {
-    const responseJson = tryParseJson(text);
-    const partIds = extractCreatedPartIds(responseJson, merged.partIdResponsePath);
-    if (partIds.length === 0) {
-      imageUploadNote = "No part IDs found in response, skipped image upload.";
-    } else {
-      const result = await tryUploadImagesToParts({
-        baseUrl: merged.inventreeUrl,
-        token: merged.inventreeToken,
-        uploadPathTemplate: merged.partImageUploadPath,
-        partIds,
-        items: payload.items
-      });
-      uploadedImages = result.uploaded;
-      skippedImages = result.skipped;
-      if (result.firstError) {
-        imageUploadNote = `Image upload issue: ${result.firstError}`;
-      }
-    }
-  }
-
+  const responseJson = tryParseJson(text) || {};
   return {
     ok: true,
-    mode: "plugin",
     status: response.status,
-    sentCount: payload.items.length,
-    skippedExisting: filtered.skippedExisting,
-    matchedForUpdate: filtered.matchedForUpdate,
-    uploadedImages,
-    skippedImages,
-    imageUploadNote,
+    rowCount: rawCapture.rows.length,
+    captureId: responseJson.capture_id ?? null,
+    workspacePath: responseJson.workspace_path || "",
     responsePreview: (text || "").slice(0, 300)
   };
 }
@@ -1516,48 +1439,17 @@ async function getSettings() {
 }
 
 function sanitizeSettings(input) {
-  const inventreeSyncMode = String(input.inventreeSyncMode || "plugin").trim().toLowerCase();
   const sourceMode = String(input.sourceMode || "auto").trim().toLowerCase();
   const sourceModeSafe = ["auto", "mcmaster", "boltdepot", "amazon"].includes(sourceMode) ? sourceMode : "auto";
+  const captureProfile = String(input.captureProfile || "auto").trim().toLowerCase();
   return {
-    inventreeSyncMode: inventreeSyncMode === "direct" ? "direct" : "plugin",
     inventreeUrl: String(input.inventreeUrl || "").trim(),
     inventreeToken: String(input.inventreeToken || "").trim(),
-    inventreeEndpointPath: normalizePath(input.inventreeEndpointPath, "/api/plugin/product-import/"),
-    inventreePartApiPath: normalizePath(input.inventreePartApiPath, "/api/part/"),
-    inventreeSupplierPartApiPath: normalizePath(input.inventreeSupplierPartApiPath, "/api/company/part/"),
-    inventreeStockItemApiPath: normalizePath(input.inventreeStockItemApiPath, "/api/stock/"),
-    inventreePartParameterApiPath: normalizePath(input.inventreePartParameterApiPath, "/api/part/parameter/"),
-    inventreeParameterTemplateApiPath: normalizePath(input.inventreeParameterTemplateApiPath, "/api/part/parameter/template/"),
-    inventreeDefaultCategoryId: String(input.inventreeDefaultCategoryId || "").trim(),
-    enableCategoryBuilder: Boolean(input.enableCategoryBuilder),
-    inventreeDefaultSupplierId: String(input.inventreeDefaultSupplierId || "").trim(),
-    inventreeDefaultLocationId: String(input.inventreeDefaultLocationId || "").trim(),
-    stockQuantityHeaderHint: String(input.stockQuantityHeaderHint || "").trim(),
-    defaultStockQuantity: String(input.defaultStockQuantity || "").trim(),
-    mappingTemplatePathPattern: String(input.mappingTemplatePathPattern || "").trim(),
-    mappingTemplates: sanitizeMappingTemplates(input.mappingTemplates),
-    syncSupplierParts: input.syncSupplierParts !== false,
-    syncStockRecords: Boolean(input.syncStockRecords),
-    syncPartParameters: Boolean(input.syncPartParameters),
-    autoCreateMissingParameterTemplates: Boolean(input.autoCreateMissingParameterTemplates),
-    parameterMappingsText: String(input.parameterMappingsText || ""),
+    inventreeEndpointPath: normalizePath(input.inventreeEndpointPath, "/plugin/multi-site-importer/captures/"),
     sourceMode: sourceModeSafe,
+    captureProfile: ["auto", "list-details", "single-item"].includes(captureProfile) ? captureProfile : "auto",
     crawlLinkedPages: Boolean(input.crawlLinkedPages),
-    maxLinkedPages: Math.min(80, Math.max(1, Number(input.maxLinkedPages || 20))),
-    nameHeaderHint: String(input.nameHeaderHint || "").trim(),
-    descriptionHeaderHint: String(input.descriptionHeaderHint || "").trim(),
-    mpnHeaderHint: String(input.mpnHeaderHint || "").trim(),
-    supplierPnHeaderHint: String(input.supplierPnHeaderHint || "").trim(),
-    imageHeaderHint: String(input.imageHeaderHint || "").trim(),
-    includeImageUrls: Boolean(input.includeImageUrls),
-    uploadImagesIfSupported: Boolean(input.uploadImagesIfSupported),
-    nameComposeFields: String(input.nameComposeFields || "").trim(),
-    nameComposeDelimiter: String(input.nameComposeDelimiter || " - "),
-    globalImageSourceField: String(input.globalImageSourceField || "").trim(),
-    partImageUploadPath: normalizePath(input.partImageUploadPath, "/api/part/{id}/upload/"),
-    partIdResponsePath: String(input.partIdResponsePath || "").trim(),
-    existingMatchStrategy: input.existingMatchStrategy === "update" ? "update" : "skip"
+    maxLinkedPages: Math.min(500, Math.max(1, Number(input.maxLinkedPages || 100)))
   };
 }
 
@@ -1626,7 +1518,7 @@ async function previewLinkedPages(settings) {
   }
 
   const provider = detectProvider(tab.url, settings.sourceMode);
-  const maxLinks = Math.min(80, Math.max(1, Number(settings.maxLinkedPages || 20)));
+  const maxLinks = Math.min(500, Math.max(1, Number(settings.maxLinkedPages || 100)));
 
   if (provider === "amazon") {
     const data = await executeScraperOnTab(tab.id, scrapeAmazonOrderItems);
@@ -1647,8 +1539,14 @@ async function previewLinkedPages(settings) {
   const data = provider === "boltdepot"
     ? await executeScraperOnTab(tab.id, scrapeBoltDepotPageData)
     : await executeScraperOnTab(tab.id, scrapeMcMasterCategoryData);
-  const links = Array.isArray(data?.childLinks) ? data.childLinks : [];
-  return { links: links.slice(0, maxLinks), itemLabels: {} };
+  const links = itemDetailTargets(data?.rows || [], data?.childLinks || [], [], maxLinks);
+  const itemLabels = {};
+  for (const row of data?.rows || []) {
+    const url = String(row?.ProductURL || row?.["Product URL"] || "").trim();
+    if (!url) continue;
+    itemLabels[url] = String(row?.Product || row?.Description || row?.McMasterPartNumber || row?.BoltDepotPartNumber || url);
+  }
+  return { links, itemLabels };
 }
 
 function detectProvider(url, sourceMode) {
@@ -1672,10 +1570,141 @@ function detectProvider(url, sourceMode) {
 
 async function executeScraperOnTab(tabId, scraper) {
   const injected = await chrome.scripting.executeScript({
-    target: { tabId },
+    target: { tabId, allFrames: true },
     func: scraper
   });
-  return injected?.[0]?.result || null;
+  const results = (injected || []).map((entry) => entry?.result).filter(Boolean);
+  if (results.length === 0) return null;
+
+  function resultScore(result) {
+    let score = result?.ok ? 100 : 0;
+    const rows = Array.isArray(result?.rows) ? result.rows : (result?.row ? [result.row] : []);
+    score += rows.length * 1000;
+    for (const row of rows.slice(0, 10)) {
+      for (const value of Object.values(row || {})) {
+        const text = String(value || "").trim();
+        if (text) score += Math.min(40, text.length);
+      }
+      score += String(row?.ProductDetailSpecs || "").length * 4;
+      score += String(row?.ProductDetailBreadcrumbs || "").length * 2;
+    }
+    const title = String(result?.pageTitle || result?.row?.ProductDetailPageTitle || "").trim();
+    if (title && !/^mcmaster-carr$/i.test(title)) score += 500;
+    return score;
+  }
+
+  return results.sort((left, right) => resultScore(right) - resultScore(left))[0];
+}
+
+async function waitForMcMasterDetailResult(tabId, timeoutMs = 12000) {
+  const startedAt = Date.now();
+  let best = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    const current = await executeScraperOnTab(tabId, scrapeMcMasterProductDetailData);
+    if (current?.row) {
+      const currentTitle = String(current.row.ProductDetailPageTitle || current.pageTitle || "").trim();
+      const bestTitle = String(best?.row?.ProductDetailPageTitle || best?.pageTitle || "").trim();
+      const currentRichness =
+        String(current.row.ProductDetailSpecs || "").length +
+        String(current.row.ProductDetailNotes || "").length +
+        (currentTitle && !/^mcmaster-carr$/i.test(currentTitle) ? 1000 : 0);
+      const bestRichness =
+        String(best?.row?.ProductDetailSpecs || "").length +
+        String(best?.row?.ProductDetailNotes || "").length +
+        (bestTitle && !/^mcmaster-carr$/i.test(bestTitle) ? 1000 : 0);
+      if (!best || currentRichness > bestRichness) best = current;
+      const hasProductDetails =
+        String(current.row.ProductDetailSpecs || "").trim() ||
+        String(current.row.ProductDetailThreadSize || "").trim() ||
+        String(current.row.ProductDetailLength || "").trim() ||
+        Object.entries(current.row).some(([key, value]) =>
+          key.startsWith("Spec_") && String(value || "").trim()
+        );
+      if (hasProductDetails) return current;
+      if (currentTitle && !/^mcmaster-carr$/i.test(currentTitle)) return current;
+      if (String(current.row.ProductDetailAccessWarning || "").trim()) return current;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return best;
+}
+
+async function mapWithConcurrency(items, concurrency, worker) {
+  const values = Array.from(items || []);
+  const results = new Array(values.length);
+  let nextIndex = 0;
+
+  async function runWorker(workerIndex) {
+    while (nextIndex < values.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await worker(values[index], index, workerIndex);
+    }
+  }
+
+  const workerCount = Math.min(Math.max(1, concurrency), values.length);
+  await Promise.all(Array.from({ length: workerCount }, (_, index) => runWorker(index)));
+  return results;
+}
+
+function normalizedUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try {
+    const url = new URL(raw);
+    url.hash = "";
+    return url.toString().replace(/\/$/, "").toLowerCase();
+  } catch {
+    return raw.replace(/\/$/, "").toLowerCase();
+  }
+}
+
+function itemDetailTargets(rows, fallbackLinks, selectedLinks, maxLinks) {
+  const selected = new Set((selectedLinks || []).map(normalizedUrl).filter(Boolean));
+  const candidates = [];
+  const seen = new Set();
+  const rowLinks = (rows || [])
+    .map((row) => row?.ProductURL || row?.["Product URL"])
+    .filter((value) => normalizedUrl(value));
+  const sourceLinks = rowLinks.length > 0 ? rowLinks : (fallbackLinks || []);
+  for (const value of sourceLinks) {
+    const key = normalizedUrl(value);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    candidates.push(String(value).trim());
+  }
+  const filtered = selected.size > 0
+    ? candidates.filter((url) => selected.has(normalizedUrl(url)))
+    : candidates;
+  return filtered.slice(0, maxLinks);
+}
+
+function mergeRowsWithDetails(baseRows, detailRows, partField) {
+  const detailsByUrl = new Map();
+  const detailsByPart = new Map();
+  for (const detail of detailRows || []) {
+    const url = normalizedUrl(detail?.ProductURL);
+    const part = String(detail?.[partField] || "").trim().toLowerCase();
+    if (url) detailsByUrl.set(url, detail);
+    if (part) detailsByPart.set(part, detail);
+  }
+
+  return (baseRows || []).map((base) => {
+    const url = normalizedUrl(base?.ProductURL);
+    const part = String(base?.[partField] || "").trim().toLowerCase();
+    const detail = detailsByUrl.get(url) || detailsByPart.get(part);
+    if (!detail) return base;
+    return {
+      ...base,
+      ...detail,
+      SourcePageURL: base.SourcePageURL || base.ProductListPageURL || "",
+      SourcePageTitle: base.SourcePageTitle || base.PageTitle || "",
+      SourcePageBreadcrumbs: base.SourcePageBreadcrumbs || base.PageBreadcrumbs || "",
+      ProductListPageURL: base.ProductListPageURL || base.SourcePageURL || "",
+      ProductListPageTitle: base.ProductListPageTitle || base.PageTitle || "",
+      ProductListBreadcrumbs: base.ProductListBreadcrumbs || base.PageBreadcrumbs || ""
+    };
+  });
 }
 
 async function captureMcmasterTab(tab, settings, selectedChildLinks) {
@@ -1683,119 +1712,157 @@ async function captureMcmasterTab(tab, settings, selectedChildLinks) {
     throw new Error("Active tab is not a McMaster-Carr page.");
   }
 
-  const primary = await executeScraperOnTab(tab.id, scrapeMcMasterCategoryData);
+  if (settings.captureProfile === "single-item") {
+    const detail = await executeScraperOnTab(tab.id, scrapeMcMasterProductDetailData);
+    if (!detail?.ok || !detail.row) throw new Error(detail?.error || "This is not a McMaster product-detail view.");
+    return {
+      source: "mcmaster-carr", captureProfile: "single-item", pageType: "product-detail",
+      capturedAt: new Date().toISOString(), pageTitle: detail.pageTitle,
+      pageBreadcrumbs: detail.row.ProductDetailBreadcrumbs || "", pageUrl: tab.url,
+      headers: detail.headers || Object.keys(detail.row), rows: [detail.row], pagesScraped: 1,
+      linkedPagesFound: 0, linkedPagesCrawled: 0
+    };
+  }
+
+  let primary = await executeScraperOnTab(tab.id, scrapeMcMasterCategoryData);
   if (!primary?.ok) {
-    throw new Error(primary?.error || "Could not parse McMaster table data on this page.");
+    const detail = await executeScraperOnTab(tab.id, scrapeMcMasterProductDetailData);
+    if (!detail?.ok || !detail.row) {
+      throw new Error(primary?.error || detail?.error || "Could not parse this McMaster page.");
+    }
+    return {
+      source: "mcmaster-carr",
+      captureProfile: "single-item",
+      pageType: "product-detail",
+      capturedAt: new Date().toISOString(),
+      pageTitle: detail.pageTitle,
+      pageBreadcrumbs: detail.pageBreadcrumbs || detail.row.ProductDetailBreadcrumbs || "",
+      pageUrl: tab.url,
+      headers: detail.headers || Object.keys(detail.row),
+      rows: [detail.row],
+      pagesScraped: 1,
+      linkedPagesFound: 0,
+      linkedPagesCrawled: 0
+    };
   }
 
   const allRows = Array.isArray(primary.rows) ? [...primary.rows] : [];
+  if (settings.captureProfile === "list-details" && !allRows.some((row) => normalizedUrl(row?.ProductURL))) {
+    throw new Error("The selected exporter profile requires a list/table containing product links.");
+  }
+  for (const row of allRows) {
+    row.ProductListPageURL = tab.url;
+    row.ProductListPageTitle = primary.pageTitle || row.PageTitle || "";
+    row.ProductListBreadcrumbs = primary.pageBreadcrumbs || row.PageBreadcrumbs || "";
+    row.SourcePageURL = tab.url;
+    row.SourcePageTitle = primary.pageTitle || row.PageTitle || "";
+    row.SourcePageBreadcrumbs = primary.pageBreadcrumbs || row.PageBreadcrumbs || "";
+  }
   const headerSet = new Set(Array.isArray(primary.headers) ? primary.headers : []);
   let pagesScraped = 1;
 
-  function mergeRowWithDetail(baseRow, detailRow) {
-    const merged = { ...baseRow };
-    for (const [key, value] of Object.entries(detailRow || {})) {
-      const text = String(value ?? "").trim();
-      if (!text) continue;
-      merged[key] = value;
-    }
-    return merged;
-  }
-
-  function mergeMcmasterRowsWithDetails(baseRows, detailRows) {
-    const byUrl = new Map();
-    const byPart = new Map();
-    const usedDetails = new Set();
-
-    for (const detail of detailRows || []) {
-      const detailUrl = String(detail?.ProductURL || "").trim().toLowerCase();
-      const detailPart = String(detail?.McMasterPartNumber || "").trim().toLowerCase();
-      if (detailUrl) byUrl.set(detailUrl, detail);
-      if (detailPart) byPart.set(detailPart, detail);
-    }
-
-    const merged = [];
-    for (const row of baseRows || []) {
-      const rowUrl = String(row?.ProductURL || "").trim().toLowerCase();
-      const rowPart = String(row?.McMasterPartNumber || "").trim().toLowerCase();
-      const detail = (rowUrl && byUrl.get(rowUrl)) || (rowPart && byPart.get(rowPart)) || null;
-      if (!detail) {
-        merged.push(row);
-        continue;
-      }
-
-      usedDetails.add(detail);
-      merged.push(mergeRowWithDetail(row, detail));
-    }
-
-    for (const detail of detailRows || []) {
-      if (!usedDetails.has(detail)) {
-        merged.push(detail);
-      }
-    }
-
-    return merged;
-  }
-
   const links = Array.isArray(primary.childLinks) ? primary.childLinks : [];
-  const shouldCrawl = Boolean(settings.crawlLinkedPages);
-  const maxLinks = Math.min(80, Math.max(1, Number(settings.maxLinkedPages || 20)));
-  const selected = Array.isArray(selectedChildLinks)
-    ? selectedChildLinks.map((item) => String(item || "").trim()).filter(Boolean)
-    : [];
-
-  let crawlTargets = links.slice(0, maxLinks);
-  if (selected.length > 0) {
-    const selectedSet = new Set(selected);
-    crawlTargets = crawlTargets.filter((url) => selectedSet.has(url));
-  }
+  const maxLinks = Math.min(500, Math.max(1, Number(settings.maxLinkedPages || 100)));
+  const crawlTargets = itemDetailTargets(allRows, links, selectedChildLinks, maxLinks);
 
   const detailRows = [];
-  if (shouldCrawl && crawlTargets.length > 0) {
-    for (const url of crawlTargets) {
-      const childTab = await chrome.tabs.create({ url, active: false });
-      try {
+  if (crawlTargets.length > 0) {
+    let crawlCompleted = 0;
+    await setCaptureProgress({
+      status: "running",
+      completed: 0,
+      total: crawlTargets.length,
+      message: `Capturing McMaster detail pages: 0 of ${crawlTargets.length}.`
+    });
+    const captureWindows = new Map();
+    let crawlResults;
+    try {
+      crawlResults = await mapWithConcurrency(crawlTargets, 1, async (url, _index, workerIndex) => {
+        let captureWindow = captureWindows.get(workerIndex);
+        let childTab;
+        if (!captureWindow) {
+          captureWindow = await chrome.windows.create({
+            url,
+            type: "popup",
+            focused: true,
+            width: 1100,
+            height: 800
+          });
+          childTab = captureWindow.tabs?.[0];
+          captureWindows.set(workerIndex, {
+            windowId: captureWindow.id,
+            tabId: childTab?.id
+          });
+        } else {
+          await chrome.windows.update(captureWindow.windowId, { focused: true });
+          childTab = await chrome.tabs.update(captureWindow.tabId, { url, active: true });
+        }
+
+        if (!childTab?.id) return null;
+
+        try {
         await waitForTabLoaded(childTab.id, 30000);
 
-        const detail = await executeScraperOnTab(childTab.id, scrapeMcMasterProductDetailData);
+        const detail = await waitForMcMasterDetailResult(childTab.id);
         if (detail?.ok && detail.row) {
-          detailRows.push(detail.row);
-          for (const header of detail.headers || []) {
-            headerSet.add(header);
-          }
-          pagesScraped += 1;
-          continue;
+          return { detail };
         }
 
         const child = await executeScraperOnTab(childTab.id, scrapeMcMasterCategoryData);
         if (!child?.ok || !Array.isArray(child.rows)) {
-          continue;
+          return null;
         }
-        for (const row of child.rows) {
-          allRows.push(row);
-        }
-        for (const header of child.headers || []) {
-          headerSet.add(header);
-        }
-        pagesScraped += 1;
+        return { child };
       } catch {
         // Continue with remaining pages on one-off failures.
-      } finally {
-        if (childTab.id) {
+        return null;
+        } finally {
+          crawlCompleted += 1;
+          await setCaptureProgress({
+            status: "running",
+            completed: crawlCompleted,
+            total: crawlTargets.length,
+            message: `Capturing McMaster detail pages: ${crawlCompleted} of ${crawlTargets.length}.`
+          });
+        }
+      });
+    } finally {
+      await Promise.all(Array.from(captureWindows.values(), async ({ windowId }) => {
+        if (windowId) {
           try {
-            await chrome.tabs.remove(childTab.id);
+            await chrome.windows.remove(windowId);
           } catch {
             // no-op
           }
         }
+      }));
+    }
+
+    for (const result of crawlResults || []) {
+      if (result?.detail?.row) {
+        detailRows.push(result.detail.row);
+        for (const header of result.detail.headers || []) {
+          headerSet.add(header);
+        }
+        pagesScraped += 1;
+      } else if (Array.isArray(result?.child?.rows)) {
+        allRows.push(...result.child.rows);
+        for (const header of result.child.headers || []) {
+          headerSet.add(header);
+        }
+        pagesScraped += 1;
       }
     }
   }
 
   if (detailRows.length > 0) {
-    const mergedWithDetails = mergeMcmasterRowsWithDetails(allRows, detailRows);
+    const mergedWithDetails = mergeRowsWithDetails(allRows, detailRows, "McMasterPartNumber");
     allRows.length = 0;
     allRows.push(...mergedWithDetails);
+  }
+
+  for (const row of allRows) {
+    for (const key of Object.keys(row || {})) headerSet.add(key);
   }
 
   const dedupedRows = dedupeRows(allRows);
@@ -1805,6 +1872,7 @@ async function captureMcmasterTab(tab, settings, selectedChildLinks) {
 
   return {
     source: "mcmaster-carr",
+    captureProfile: "list-details",
     pageType: primary.pageType || "category",
     capturedAt: new Date().toISOString(),
     pageTitle: primary.pageTitle,
@@ -1819,7 +1887,7 @@ async function captureMcmasterTab(tab, settings, selectedChildLinks) {
     rows: dedupedRows,
     pagesScraped,
     linkedPagesFound: links.length,
-    linkedPagesCrawled: shouldCrawl ? crawlTargets.length : 0
+    linkedPagesCrawled: crawlTargets.length
   };
 }
 
@@ -1828,33 +1896,79 @@ async function captureBoltDepotTab(tab, settings, selectedChildLinks) {
     throw new Error("Active tab is not a Bolt Depot page.");
   }
 
-  const primary = await executeScraperOnTab(tab.id, scrapeBoltDepotPageData);
-  if (!primary?.ok) {
-    throw new Error(primary?.error || "Could not parse Bolt Depot page data.");
+  if (settings.captureProfile === "single-item") {
+    const detail = await executeScraperOnTab(tab.id, scrapeBoltDepotProductDetailData);
+    if (!detail?.ok || !detail.row) throw new Error(detail?.error || "This is not a Bolt Depot product-detail view.");
+    return {
+      source: "boltdepot", captureProfile: "single-item", pageType: "product-detail",
+      capturedAt: new Date().toISOString(), pageTitle: detail.pageTitle,
+      pageBreadcrumbs: detail.pageBreadcrumbs || "", pageUrl: tab.url,
+      headers: detail.headers || Object.keys(detail.row), rows: [detail.row], pagesScraped: 1,
+      linkedPagesFound: 0, linkedPagesCrawled: 0
+    };
+  }
+
+  let primary = await executeScraperOnTab(tab.id, scrapeBoltDepotPageData);
+  const primaryRows = Array.isArray(primary?.rows) ? primary.rows : [];
+  const hasLinkedItems = primaryRows.some((row) => {
+    const url = normalizedUrl(row?.ProductURL);
+    return url && url !== normalizedUrl(tab.url);
+  });
+  if (!primary?.ok || (!hasLinkedItems && primary?.pageType !== "order-details")) {
+    const detail = await executeScraperOnTab(tab.id, scrapeBoltDepotProductDetailData);
+    if (detail?.ok && detail.row) {
+      return {
+        source: "boltdepot",
+        captureProfile: "single-item",
+        pageType: "product-detail",
+        capturedAt: new Date().toISOString(),
+        pageTitle: detail.pageTitle,
+        pageBreadcrumbs: detail.pageBreadcrumbs || detail.row.ProductDetailBreadcrumbs || "",
+        pageUrl: tab.url,
+        headers: detail.headers || Object.keys(detail.row),
+        rows: [detail.row],
+        pagesScraped: 1,
+        linkedPagesFound: 0,
+        linkedPagesCrawled: 0
+      };
+    }
+    if (!primary?.ok) {
+      throw new Error(primary?.error || detail?.error || "Could not parse this Bolt Depot page.");
+    }
   }
 
   const allRows = Array.isArray(primary.rows) ? [...primary.rows] : [];
+  if (settings.captureProfile === "list-details" && !allRows.some((row) => normalizedUrl(row?.ProductURL))) {
+    throw new Error("The selected exporter profile requires a list/table containing product links.");
+  }
+  for (const row of allRows) {
+    row.ProductListPageURL = tab.url;
+    row.ProductListPageTitle = primary.pageTitle || row.PageTitle || "";
+    row.ProductListBreadcrumbs = primary.pageBreadcrumbs || row.PageBreadcrumbs || "";
+    row.SourcePageURL = tab.url;
+    row.SourcePageTitle = primary.pageTitle || row.PageTitle || "";
+    row.SourcePageBreadcrumbs = primary.pageBreadcrumbs || row.PageBreadcrumbs || "";
+  }
   const headerSet = new Set(Array.isArray(primary.headers) ? primary.headers : []);
   let pagesScraped = 1;
 
   const links = Array.isArray(primary.childLinks) ? primary.childLinks : [];
-  const shouldCrawl = Boolean(settings.crawlLinkedPages);
-  const maxLinks = Math.min(80, Math.max(1, Number(settings.maxLinkedPages || 20)));
-  const selected = Array.isArray(selectedChildLinks)
-    ? selectedChildLinks.map((item) => String(item || "").trim()).filter(Boolean)
-    : [];
+  const maxLinks = Math.min(500, Math.max(1, Number(settings.maxLinkedPages || 100)));
+  const crawlTargets = itemDetailTargets(allRows, links, selectedChildLinks, maxLinks);
+  const detailRows = [];
 
-  let crawlTargets = links.slice(0, maxLinks);
-  if (selected.length > 0) {
-    const selectedSet = new Set(selected);
-    crawlTargets = crawlTargets.filter((url) => selectedSet.has(url));
-  }
-
-  if (shouldCrawl && crawlTargets.length > 0) {
+  if (crawlTargets.length > 0) {
     for (const url of crawlTargets) {
       const childTab = await chrome.tabs.create({ url, active: false });
       try {
         await waitForTabLoaded(childTab.id, 30000);
+        const detail = await executeScraperOnTab(childTab.id, scrapeBoltDepotProductDetailData);
+        if (detail?.ok && detail.row) {
+          detailRows.push(detail.row);
+          for (const header of detail.headers || []) headerSet.add(header);
+          pagesScraped += 1;
+          continue;
+        }
         const child = await executeScraperOnTab(childTab.id, scrapeBoltDepotPageData);
         if (!child?.ok || !Array.isArray(child.rows)) {
           continue;
@@ -1880,6 +1994,16 @@ async function captureBoltDepotTab(tab, settings, selectedChildLinks) {
     }
   }
 
+  if (detailRows.length > 0) {
+    const merged = mergeRowsWithDetails(allRows, detailRows, "BoltDepotPartNumber");
+    allRows.length = 0;
+    allRows.push(...merged);
+  }
+
+  for (const row of allRows) {
+    for (const key of Object.keys(row || {})) headerSet.add(key);
+  }
+
   const dedupedRows = dedupeRows(allRows);
   if (dedupedRows.length === 0) {
     throw new Error("No product rows found on this Bolt Depot page or linked child pages.");
@@ -1887,15 +2011,17 @@ async function captureBoltDepotTab(tab, settings, selectedChildLinks) {
 
   return {
     source: "boltdepot",
+    captureProfile: "list-details",
     pageType: primary.pageType || "catalog",
     capturedAt: new Date().toISOString(),
     pageTitle: primary.pageTitle,
+    pageBreadcrumbs: primary.pageBreadcrumbs || "",
     pageUrl: tab.url,
     headers: Array.from(headerSet),
     rows: dedupedRows,
     pagesScraped,
     linkedPagesFound: links.length,
-    linkedPagesCrawled: shouldCrawl ? crawlTargets.length : 0
+    linkedPagesCrawled: crawlTargets.length
   };
 }
 
@@ -1906,12 +2032,38 @@ async function captureAmazonTab(tab, settings, selectedOrderItems) {
     throw new Error("Active tab is not an Amazon page.");
   }
 
+  if (settings.captureProfile === "single-item") {
+    const detail = await executeScraperOnTab(tab.id, scrapeAmazonProductPage);
+    if (!detail?.ok || !detail.row) throw new Error(detail?.error || "This is not an Amazon product-detail view.");
+    return {
+      source: "amazon", captureProfile: "single-item", pageType: "product-detail",
+      capturedAt: new Date().toISOString(), pageTitle: detail.pageTitle,
+      pageBreadcrumbs: detail.pageBreadcrumbs || "", pageUrl: tab.url,
+      headers: detail.headers || Object.keys(detail.row), rows: [detail.row], pagesScraped: 1,
+      linkedPagesFound: 0, linkedPagesCrawled: 0
+    };
+  }
+
   const primary = await executeScraperOnTab(tab.id, scrapeAmazonOrderItems);
   if (!primary?.ok) {
-    throw new Error(
-      primary?.error ||
-        "Could not find Amazon product links on this page. Navigate to an order history or order details page."
-    );
+    const detail = await executeScraperOnTab(tab.id, scrapeAmazonProductPage);
+    if (detail?.ok && detail.row) {
+      return {
+        source: "amazon",
+        captureProfile: "single-item",
+        pageType: "product-detail",
+        capturedAt: new Date().toISOString(),
+        pageTitle: detail.pageTitle,
+        pageBreadcrumbs: detail.pageBreadcrumbs || detail.row.Category || "",
+        pageUrl: tab.url,
+        headers: detail.headers || Object.keys(detail.row),
+        rows: [detail.row],
+        pagesScraped: 1,
+        linkedPagesFound: 0,
+        linkedPagesCrawled: 0
+      };
+    }
+    throw new Error(primary?.error || detail?.error || "Could not parse this Amazon page.");
   }
 
   const allItems = Array.isArray(primary.items) ? primary.items : [];
@@ -1920,7 +2072,7 @@ async function captureAmazonTab(tab, settings, selectedOrderItems) {
     ? selectedOrderItems.map((url) => String(url || "").trim()).filter(Boolean)
     : [];
 
-  const maxLinks = Math.min(80, Math.max(1, Number(settings.maxLinkedPages || 20)));
+  const maxLinks = Math.min(500, Math.max(1, Number(settings.maxLinkedPages || 100)));
 
   let targetItems = allItems.slice(0, maxLinks);
   if (selected.length > 0) {
@@ -1939,10 +2091,18 @@ async function captureAmazonTab(tab, settings, selectedOrderItems) {
       const product = await executeScraperOnTab(childTab.id, scrapeAmazonProductPage);
       if (!product?.ok || !product.row) continue;
 
-      allRows.push(product.row);
-      for (const header of product.headers || []) {
-        headerSet.add(header);
-      }
+      const enrichedRow = {
+        ...product.row,
+        SourcePageURL: tab.url,
+        SourcePageTitle: primary.pageTitle || "",
+        ProductListPageURL: tab.url,
+        ProductListPageTitle: primary.pageTitle || "",
+        SourceItemLabel: item.label || "",
+        SourceItemImageURL: item.imageUrl || "",
+        SourceItemIdentifier: item.asin || ""
+      };
+      allRows.push(enrichedRow);
+      for (const header of Object.keys(enrichedRow)) headerSet.add(header);
       pagesScraped += 1;
     } catch {
       // Continue on one-off failures.
@@ -1963,6 +2123,7 @@ async function captureAmazonTab(tab, settings, selectedOrderItems) {
 
   return {
     source: "amazon",
+    captureProfile: "list-details",
     pageType: primary.pageType || "order-items",
     capturedAt: new Date().toISOString(),
     pageTitle: primary.pageTitle,
@@ -2226,6 +2387,8 @@ function scrapeAmazonProductPage() {
   return {
     ok: Boolean(title),
     title,
+    pageTitle: title,
+    pageBreadcrumbs: category,
     asin,
     headers,
     row,
@@ -2259,6 +2422,13 @@ function dedupeRows(rows) {
 }
 
 async function waitForTabLoaded(tabId, timeoutMs) {
+  try {
+    const current = await chrome.tabs.get(tabId);
+    if (current?.status === "complete") return;
+  } catch {
+    throw new Error("Tab closed before load complete");
+  }
+
   await new Promise((resolve, reject) => {
     let done = false;
     const timer = setTimeout(() => {
@@ -2294,6 +2464,19 @@ async function waitForTabLoaded(tabId, timeoutMs) {
 
     chrome.tabs.onUpdated.addListener(onUpdated);
     chrome.tabs.onRemoved.addListener(onRemoved);
+    chrome.tabs.get(tabId).then((current) => {
+      if (!done && current?.status === "complete") {
+        done = true;
+        cleanup();
+        resolve();
+      }
+    }).catch(() => {
+      if (!done) {
+        done = true;
+        cleanup();
+        reject(new Error("Tab closed before load complete"));
+      }
+    });
   });
 }
 
@@ -2303,6 +2486,18 @@ function scrapeBoltDepotPageData() {
   }
 
   const isOrderDetailsPage = /\/Account\/Order-Details/i.test(location.pathname);
+
+  function parseBreadcrumbs() {
+    const root = document.querySelector("nav[aria-label*='breadcrumb' i], [aria-label*='breadcrumb' i], .breadcrumb, #breadcrumb, #breadcrumbs");
+    if (!root) return "";
+    return Array.from(root.querySelectorAll("a, span, li"))
+      .map((node) => normalizeText(node.textContent))
+      .filter(Boolean)
+      .join(" > ");
+  }
+
+  const pageTitle = normalizeText(document.querySelector("h1")?.textContent || document.title || "Bolt Depot");
+  const pageBreadcrumbs = parseBreadcrumbs();
 
   function toAbsolute(raw) {
     try {
@@ -2535,7 +2730,8 @@ function scrapeBoltDepotPageData() {
     return {
       ok: childRows.length > 0,
       pageType: childRows.length > 0 ? "variant-list" : "catalog-empty",
-      pageTitle: normalizeText(document.querySelector("h1")?.textContent || document.title || "Bolt Depot"),
+      pageTitle,
+      pageBreadcrumbs,
       headers: childRows.length > 0
         ? ["Product", "Description", "ProductURL", "BoltDepotPartNumber", "RowImageURL", "SourcePageURL"]
         : ["SourcePageURL"],
@@ -2594,6 +2790,8 @@ function scrapeBoltDepotPageData() {
     }
     rowObj.RowImageURL = rowImage;
     rowObj.SourcePageURL = location.href;
+    rowObj.PageTitle = pageTitle;
+    rowObj.PageBreadcrumbs = pageBreadcrumbs;
     dataRows.push(rowObj);
   }
 
@@ -2603,7 +2801,8 @@ function scrapeBoltDepotPageData() {
       return {
         ok: true,
         pageType: "order-details",
-        pageTitle: normalizeText(document.querySelector("h1")?.textContent || document.title || "Bolt Depot"),
+        pageTitle,
+        pageBreadcrumbs,
         headers: ["Product", "Description", "Quantity", "ProductURL", "BoltDepotPartNumber", "RowImageURL", "SourcePageURL"],
         rows: fallbackRows,
         childLinks
@@ -2617,7 +2816,8 @@ function scrapeBoltDepotPageData() {
       return {
         ok: true,
         pageType: "variant-list",
-        pageTitle: normalizeText(document.querySelector("h1")?.textContent || document.title || "Bolt Depot"),
+        pageTitle,
+        pageBreadcrumbs,
         headers: ["Product", "Description", "ProductURL", "BoltDepotPartNumber", "RowImageURL", "SourcePageURL"],
         rows: childRows,
         childLinks
@@ -2628,41 +2828,133 @@ function scrapeBoltDepotPageData() {
   return {
     ok: true,
     pageType: isOrderDetailsPage ? "order-details" : "catalog-table",
-    pageTitle: normalizeText(document.querySelector("h1")?.textContent || document.title || "Bolt Depot"),
-    headers: Array.from(new Set([...headers, "ProductURL", "BoltDepotPartNumber", "Quantity", "RowImageURL", "SourcePageURL"])),
+    pageTitle,
+    pageBreadcrumbs,
+    headers: Array.from(new Set([...headers, "ProductURL", "BoltDepotPartNumber", "Quantity", "RowImageURL", "SourcePageURL", "PageTitle", "PageBreadcrumbs"])),
     rows: dataRows,
     childLinks
   };
 }
 
-function scrapeMcMasterCategoryData() {
+function scrapeBoltDepotProductDetailData() {
   function normalizeText(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
   }
 
-  function firstImageSrc(container) {
-    const image = container?.querySelector("img[src], img[data-src], img[data-original], source[srcset]");
-    if (!image) return "";
+  function absoluteUrl(raw) {
+    try { return new URL(raw, location.href).toString(); } catch { return ""; }
+  }
 
-    const srcset = image.getAttribute("srcset") || "";
-    if (srcset) {
-      const first = srcset.split(",")[0]?.trim().split(" ")[0];
-      if (first) {
-        try {
-          return new URL(first, location.href).toString();
-        } catch {
-          return first;
-        }
-      }
+  function parseBreadcrumbs() {
+    const root = document.querySelector("nav[aria-label*='breadcrumb' i], [aria-label*='breadcrumb' i], .breadcrumb, #breadcrumb, #breadcrumbs");
+    if (!root) return "";
+    return Array.from(root.querySelectorAll("a, span, li"))
+      .map((node) => normalizeText(node.textContent))
+      .filter(Boolean)
+      .join(" > ");
+  }
+
+  const headingTitle = normalizeText(document.querySelector("h1")?.textContent || "");
+  const documentTitle = normalizeText(document.title || "");
+  const title = headingTitle && !/^mcmaster-carr$/i.test(headingTitle)
+    ? headingTitle
+    : (documentTitle || headingTitle);
+  const breadcrumbs = parseBreadcrumbs();
+  const specMap = {};
+  const specLines = [];
+  for (const row of Array.from(document.querySelectorAll("table tr, dl"))) {
+    const cells = Array.from(row.querySelectorAll("th, td, dt, dd")).map((cell) => normalizeText(cell.textContent));
+    if (cells.length < 2) continue;
+    const key = cells[0];
+    const value = cells.slice(1).filter(Boolean).join(" ");
+    if (!key || !value || key === value) continue;
+    specMap[key] = value;
+    specLines.push(`${key}: ${value}`);
+  }
+
+  const bodyText = normalizeText(document.querySelector("main, [role='main'], #content")?.textContent || "");
+  const partMatch = `${title} ${bodyText} ${location.pathname}`.match(/(?:part|item|sku|product)\s*(?:number|#|no\.?)*\s*[:#-]?\s*([A-Z0-9][A-Z0-9._-]{2,})/i);
+  const partNumber = partMatch?.[1] || "";
+  const image = document.querySelector("main img[src], [role='main'] img[src], #content img[src]");
+  const imageUrl = absoluteUrl(image?.getAttribute("src") || image?.getAttribute("data-src") || "");
+  const row = {
+    Product: title,
+    Description: normalizeText(document.querySelector("main p, [role='main'] p, #content p")?.textContent || title),
+    ProductURL: location.href,
+    BoltDepotPartNumber: partNumber,
+    RowImageURL: imageUrl,
+    PageTitle: title,
+    PageBreadcrumbs: breadcrumbs,
+    ProductDetailPageTitle: title,
+    ProductDetailBreadcrumbs: breadcrumbs,
+    ProductDetailSpecs: specLines.slice(0, 80).join("\n")
+  };
+  for (const [key, value] of Object.entries(specMap)) {
+    const field = `Spec_${key}`.replace(/[^a-zA-Z0-9_]+/g, "_").replace(/_+/g, "_").replace(/^_|_$/g, "");
+    if (field) row[field] = value;
+  }
+  return {
+    ok: Boolean(title && (specLines.length > 0 || bodyText.length > 20)),
+    pageType: "product-detail",
+    pageTitle: title,
+    pageBreadcrumbs: breadcrumbs,
+    headers: Object.keys(row),
+    row,
+    error: title ? "Could not identify product details on this page." : "Could not identify a product title."
+  };
+}
+
+function scrapeMcMasterCategoryData() {
+  function normalizeText(value) {
+    let text = String(value || "");
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const repaired = text
+        .replace(/Ã‚/g, "Â")
+        .replace(/Ã¢â‚¬â€œ/g, "â€“")
+        .replace(/Ã¢â‚¬â€/g, "â€”")
+        .replace(/Ã¢â‚¬â„¢/g, "â€™")
+        .replace(/Â°/g, "°")
+        .replace(/Â([®©™±µ·])/g, "$1")
+        .replace(/â€“/g, "–")
+        .replace(/â€”/g, "—")
+        .replace(/â€™/g, "’")
+        .replace(/â€œ/g, "“")
+        .replace(/â€/g, "”")
+        .replace(/â€¦/g, "…");
+      if (repaired === text) break;
+      text = repaired;
     }
+    return text.replace(/\s+/g, " ").trim();
+  }
 
-    const raw = image.getAttribute("src") || image.getAttribute("data-src") || image.getAttribute("data-original") || "";
-    if (!raw) return "";
+  function cleanImageUrl(raw) {
+    if (!raw || /(?:industrial-information-icon|placeholder|image[-_ ]?not[-_ ]?found)/i.test(raw)) return "";
     try {
-      return new URL(raw, location.href).toString();
+      const url = new URL(raw, location.href);
+      if (/^imagenotfound$/i.test(url.searchParams.get("ver") || "")) {
+        url.searchParams.delete("ver");
+      }
+      return url.toString();
     } catch {
       return raw;
     }
+  }
+
+  function firstImageSrc(container) {
+    for (const image of Array.from(container?.querySelectorAll?.("img[src], img[data-src], img[data-original], source[srcset]") || [])) {
+      const alt = normalizeText(image.getAttribute("alt") || "");
+      if (/image\s*not\s*found|placeholder/i.test(alt)) continue;
+      const srcset = image.getAttribute("srcset") || "";
+      if (srcset) {
+        const first = srcset.split(",")[0]?.trim().split(" ")[0];
+        const cleaned = cleanImageUrl(first);
+        if (cleaned) return cleaned;
+      }
+      const raw = image.getAttribute("src") || image.getAttribute("data-src") || image.getAttribute("data-original") || "";
+      const cleaned = cleanImageUrl(raw);
+      if (cleaned) return cleaned;
+    }
+    return "";
   }
 
   function buildSectionImageCandidates(table) {
@@ -2702,11 +2994,19 @@ function scrapeMcMasterCategoryData() {
   function parseBreadcrumbs() {
     const breadcrumbRoot = document.querySelector("nav[aria-label*='breadcrumb' i], [aria-label*='breadcrumb' i], .breadcrumb, #breadcrumb, #breadcrumbs");
     if (breadcrumbRoot) {
-      const links = Array.from(breadcrumbRoot.querySelectorAll("a, span, li"))
-        .map((node) => normalizeText(node.textContent))
-        .filter(Boolean);
-      if (links.length > 1) {
-        return links.join(" > ");
+      const labels = [];
+      const seen = new Set();
+      for (const node of Array.from(breadcrumbRoot.querySelectorAll("a, [aria-current='page'], li, span"))) {
+        if (node.matches("li") && node.querySelector("a, span")) continue;
+        if (node.matches("span") && (node.closest("a") || node.querySelector("a, span"))) continue;
+        const text = normalizeText(node.textContent);
+        const key = text.toLowerCase();
+        if (!text || /^(?:>|\/|…|\.\.\.)$/.test(text) || seen.has(key)) continue;
+        seen.add(key);
+        labels.push(text);
+      }
+      if (labels.length > 0) {
+        return labels.join(" > ");
       }
       const inlineText = normalizeText(breadcrumbRoot.textContent);
       if (inlineText.includes(">")) {
@@ -3119,37 +3419,71 @@ function scrapeMcMasterCategoryData() {
 
 function scrapeMcMasterProductDetailData() {
   function normalizeText(value) {
-    return String(value || "").replace(/\s+/g, " ").trim();
+    let text = String(value || "");
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const repaired = text
+        .replace(/Ã‚/g, "Â")
+        .replace(/Ã¢â‚¬â€œ/g, "â€“")
+        .replace(/Ã¢â‚¬â€/g, "â€”")
+        .replace(/Ã¢â‚¬â„¢/g, "â€™")
+        .replace(/Â°/g, "°")
+        .replace(/Â([®©™±µ·])/g, "$1")
+        .replace(/â€“/g, "–")
+        .replace(/â€”/g, "—")
+        .replace(/â€™/g, "’")
+        .replace(/â€œ/g, "“")
+        .replace(/â€/g, "”")
+        .replace(/â€¦/g, "…");
+      if (repaired === text) break;
+      text = repaired;
+    }
+    return text.replace(/\s+/g, " ").trim();
   }
 
   function toAbsolute(raw) {
     try {
-      return new URL(raw, location.href).toString();
+      const url = new URL(raw, location.href);
+      if (/^imagenotfound$/i.test(url.searchParams.get("ver") || "")) {
+        url.searchParams.delete("ver");
+      }
+      if (/(?:industrial-information-icon|placeholder|image[-_ ]?not[-_ ]?found)/i.test(url.pathname)) return "";
+      return url.toString();
     } catch {
       return "";
     }
   }
 
   function firstImageSrc(container) {
-    const image = container?.querySelector("img[src], img[data-src], img[data-original], source[srcset]");
-    if (!image) return "";
-
-    const srcset = image.getAttribute("srcset") || "";
-    if (srcset) {
-      const first = srcset.split(",")[0]?.trim().split(" ")[0] || "";
-      if (first) return toAbsolute(first) || first;
+    for (const image of Array.from(container?.querySelectorAll?.("img[src], img[data-src], img[data-original], source[srcset]") || [])) {
+      const alt = normalizeText(image.getAttribute("alt") || "");
+      if (/image\s*not\s*found|placeholder/i.test(alt)) continue;
+      const srcset = image.getAttribute("srcset") || "";
+      if (srcset) {
+        const first = srcset.split(",")[0]?.trim().split(" ")[0] || "";
+        const cleaned = toAbsolute(first);
+        if (cleaned) return cleaned;
+      }
+      const cleaned = toAbsolute(image.getAttribute("src") || image.getAttribute("data-src") || image.getAttribute("data-original") || "");
+      if (cleaned) return cleaned;
     }
-
-    return toAbsolute(image.getAttribute("src") || image.getAttribute("data-src") || image.getAttribute("data-original") || "");
+    return "";
   }
 
   function parseBreadcrumbs() {
     const root = document.querySelector("nav[aria-label*='breadcrumb' i], [aria-label*='breadcrumb' i], .breadcrumb, #breadcrumb, #breadcrumbs");
     if (!root) return "";
-    return Array.from(root.querySelectorAll("a, span, li"))
-      .map((node) => normalizeText(node.textContent))
-      .filter(Boolean)
-      .join(" > ");
+    const labels = [];
+    const seen = new Set();
+    for (const node of Array.from(root.querySelectorAll("a, [aria-current='page'], li, span"))) {
+      if (node.matches("li") && node.querySelector("a, span")) continue;
+      if (node.matches("span") && (node.closest("a") || node.querySelector("a, span"))) continue;
+      const text = normalizeText(node.textContent);
+      const key = text.toLowerCase();
+      if (!text || /^(?:>|\/|…|\.\.\.)$/.test(text) || seen.has(key)) continue;
+      seen.add(key);
+      labels.push(text);
+    }
+    return labels.join(" > ");
   }
 
   function extractPartNumber(titleText) {
@@ -3161,7 +3495,11 @@ function scrapeMcMasterProductDetailData() {
     return fromBody ? fromBody[0].toUpperCase() : "";
   }
 
-  const title = normalizeText(document.querySelector("h1")?.textContent || document.title || "");
+  const headingTitle = normalizeText(document.querySelector("h1")?.textContent || "");
+  const documentTitle = normalizeText(document.title || "");
+  const title = headingTitle && !/^mcmaster-carr$/i.test(headingTitle)
+    ? headingTitle
+    : (documentTitle || headingTitle);
   const breadcrumbs = parseBreadcrumbs();
   const partNumber = extractPartNumber(title);
 
@@ -3202,11 +3540,21 @@ function scrapeMcMasterProductDetailData() {
     .join("\n\n")
     .slice(0, 16000);
 
-  const threadSize = Object.entries(specMap).find(([key]) => /thread\s*size/i.test(key))?.[1] || "";
-  const lengthValue = Object.entries(specMap).find(([key]) => /(?:^|\b)(?:length|lg\.?)(?:\b|$)/i.test(key))?.[1] || "";
+  const titleThreadMatch = title.match(/,\s*([^,]+?)\s+Thread Size(?:,|\s*\|)/i);
+  const titleLengthMatch = title.match(/,\s*([^,]+?)\s+Long(?:,|\s*\|)/i);
+  const threadSize =
+    Object.entries(specMap).find(([key]) => /thread\s*size/i.test(key))?.[1] ||
+    normalizeText(titleThreadMatch?.[1] || "");
+  const lengthValue =
+    Object.entries(specMap).find(([key]) => /(?:^|\b)(?:length|lg\.?)(?:\b|$)/i.test(key))?.[1] ||
+    normalizeText(titleLengthMatch?.[1] || "");
   const variant = threadSize && lengthValue
     ? `${threadSize} x ${lengthValue}`
     : (threadSize || lengthValue || "");
+  const bodyText = normalizeText(document.body?.textContent || "");
+  const accessWarning = /to continue browsing,\s*please log in/i.test(bodyText)
+    ? "McMaster login required for full product specifications."
+    : "";
 
   const imageUrl = firstImageSrc(document.querySelector("main, [role='main']") || document.body);
   const row = {
@@ -3217,13 +3565,16 @@ function scrapeMcMasterProductDetailData() {
     RowImageURL: imageUrl,
     RowImageSource: imageUrl ? "product-page" : "none",
     PageBreadcrumbs: breadcrumbs,
+    ProductDetailBreadcrumbs: breadcrumbs,
+    ProductDetailPageTitle: title,
     PageTitle: title,
     PageSectionSummary: normalizeText(document.querySelector("main p, [role='main'] p")?.textContent || ""),
     ProductDetailThreadSize: threadSize,
     ProductDetailLength: lengthValue,
     ProductDetailVariant: variant,
     ProductDetailSpecs: specText,
-    ProductDetailNotes: detailNotes
+    ProductDetailNotes: detailNotes,
+    ProductDetailAccessWarning: accessWarning
   };
 
   // Flatten first-spec values for easier mapping without regex.
@@ -3246,6 +3597,33 @@ function scrapeMcMasterProductDetailData() {
 function buildExportFilename(format) {
   const ts = new Date().toISOString().replace(/[:]/g, "-").replace(/\..+$/, "");
   return `product-inventory-export/${ts}-captured-catalog.${format}`;
+}
+
+function buildRawCapture(capture) {
+  return {
+    contract_version: "1.0",
+    capture_profile: String(capture?.captureProfile || "auto"),
+    source: String(capture?.source || "unknown"),
+    page_type: String(capture?.pageType || ""),
+    captured_at: capture?.capturedAt || new Date().toISOString(),
+    page_title: String(capture?.pageTitle || ""),
+    page_url: String(capture?.pageUrl || ""),
+    headers: Array.isArray(capture?.headers) ? capture.headers : [],
+    rows: Array.isArray(capture?.rows) ? capture.rows : [],
+    pages_scraped: Number(capture?.pagesScraped || 1)
+  };
+}
+
+function buildRawCaptureCsv(capture) {
+  const raw = buildRawCapture(capture);
+  const headers = raw.headers.length
+    ? raw.headers
+    : Array.from(new Set(raw.rows.flatMap((row) => Object.keys(row || {}))));
+  const lines = [headers.map(csvEscape).join(",")];
+  for (const row of raw.rows) {
+    lines.push(headers.map((header) => csvEscape(row?.[header] ?? "")).join(","));
+  }
+  return lines.join("\n");
 }
 
 function buildExportPayload(capture, hints) {

@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Capture #{{ capture.pk }} mapping workspace</title>
+  <style>
+    :root { color-scheme: light dark; font: 14px/1.4 system-ui, sans-serif; --accent:#096b91; --border:#d8e0e5; --panel:#fff; --muted:#66737d; --head:#eef3f6; }
+    * { box-sizing: border-box; }
+    body { margin: 0 auto; max-width: 1700px; padding: 24px; color: #1f2933; background:#f5f7f8; }
+    h1, h2, h3 { margin: 0 0 7px; } h2 { font-size: 19px; } h3 { font-size: 15px; }
+    a { color: var(--accent); } code { white-space: pre-wrap; overflow-wrap: anywhere; }
+    .meta, .hint { color:var(--muted); } .meta { margin-bottom:18px; }
+    .panel { background:var(--panel); border:1px solid var(--border); border-radius:9px; margin:12px 0; padding:15px; }
+    .toolbar, .profile-grid, .rule-row { display:grid; gap:9px; align-items:end; }
+    .toolbar { grid-template-columns:minmax(220px,2fr) repeat(3,minmax(110px,1fr)); }
+    .profile-grid { grid-template-columns:2fr 1fr 1fr 1fr 1fr; }
+    label { display:grid; gap:4px; font-weight:650; }
+    input, select, button, textarea { min-height:36px; padding:7px 9px; border:1px solid #aebdc5; border-radius:6px; background:var(--panel); color:inherit; }
+    button { cursor:pointer; border-color:var(--accent); background:var(--accent); color:white; font-weight:650; }
+    button.secondary { color:var(--accent); background:var(--panel); }
+    button.danger { color:#9a2f28; border-color:#bd625c; background:var(--panel); }
+    button:disabled { opacity:.55; cursor:default; }
+    .actions { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+    .rule-row { grid-template-columns:minmax(140px,.9fr) 105px minmax(260px,1.7fr) minmax(170px,1fr) minmax(180px,1.2fr) 78px; padding:7px 0; border-bottom:1px solid #edf1f3; }
+    .rule-row.header { font-weight:700; color:var(--muted); }
+    .rule-row output { min-height:36px; max-height:86px; overflow:auto; padding:8px; border:1px solid var(--border); border-radius:6px; background:#f8fafb; white-space:pre-wrap; overflow-wrap:anywhere; }
+    .status { display:none; border-radius:6px; margin-top:10px; padding:9px; background:#e8f3f7; }
+    .status.visible { display:block; } .status.ok { background:#e8f6ed; color:#236738; } .status.error { background:#fdebea; color:#8a241e; }
+    #categoryCreationResult { white-space:pre-wrap; }
+    .preview-wrap { overflow:auto; max-height:500px; }
+    .image-preview { display:grid; gap:5px; min-width:130px; }
+    .image-preview img { width:120px; height:90px; object-fit:contain; border:1px solid var(--border); border-radius:5px; background:white; }
+    .image-preview a { max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    table { width:100%; border-collapse:collapse; margin:12px 0; }
+    th, td { border:1px solid var(--border); padding:7px; text-align:left; vertical-align:top; }
+    th { background:var(--head); position:sticky; top:0; z-index:1; }
+    tr:nth-child(even) td { background:#fafcfd; }
+    details > summary { cursor:pointer; font-size:17px; font-weight:700; }
+    .samples { margin:0; padding-left:18px; } .context { display:grid; grid-template-columns:minmax(130px,220px) 1fr; gap:3px 10px; }
+    .scope { font-size:12px; padding:3px 7px; border-radius:999px; background:#e8f3f7; display:inline-block; }
+    .template-control[hidden], .single-control[hidden] { display:none; }
+    .template-control textarea { width:100%; min-height:58px; resize:vertical; }
+    .insert-controls { display:grid; grid-template-columns:1fr auto; gap:5px; margin-top:5px; }
+    @media (max-width:1050px) { .toolbar,.profile-grid { grid-template-columns:1fr 1fr; } .rule-row { grid-template-columns:1fr 1fr; } .rule-row.header { display:none; } }
+    @media (prefers-color-scheme:dark) {
+      :root { --accent:#70c4e5; --border:#3d4d55; --panel:#172126; --muted:#a6b5bc; --head:#26343b; }
+      body { background:#10171b; color:#e6edf1; } tr:nth-child(even) td, .rule-row output { background:#11191d; }
+      .status.ok { color:#a7e7bb; background:#183b25; } .status.error { color:#ffc1bb; background:#47201d; } .scope { background:#243b46; }
+    }
+  </style>
+</head>
+<body
+  data-capture-id="{{ capture.pk }}"
+  data-source="{{ capture.source }}"
+  data-capture-profile="{{ capture.capture_profile }}"
+  data-page-type="{{ capture.page_type }}"
+>
+  {% csrf_token %}
+  <h1>Capture #{{ capture.pk }} mapping workspace</h1>
+  <div class="meta">{{ capture.source }} · {{ capture.capture_profile }} · {{ capture.page_type }} · {{ capture.row_count }} rows · {{ capture.page_title }}</div>
+
+  <section class="panel">
+    <h2>Mapping profile</h2>
+    <div class="toolbar">
+      <label>Saved profile
+        <select id="profileSelect"><option value="">New profile</option></select>
+      </label>
+      <button id="loadProfileBtn" class="secondary" type="button">Load Selected</button>
+      <button id="newProfileBtn" class="secondary" type="button">New Profile</button>
+      <button id="deleteProfileBtn" class="danger" type="button" disabled>Delete</button>
+    </div>
+    <div class="profile-grid">
+      <label>Profile name <input id="profileName" value="{{ capture.source }} {{ capture.capture_profile }} mapping" /></label>
+      <label>Priority <input id="profilePriority" type="number" value="100" /></label>
+      <label>Host pattern <input id="hostPattern" placeholder="Optional regex" /></label>
+      <label>Path pattern <input id="pathPattern" placeholder="Optional regex" /></label>
+      <label>Active
+        <select id="profileActive"><option value="true">Yes</option><option value="false">No</option></select>
+      </label>
+    </div>
+    <p class="hint">Scope: <span class="scope">{{ capture.source }}</span> <span class="scope">{{ capture.capture_profile }}</span> <span class="scope">{{ capture.page_type }}</span></p>
+  </section>
+
+  <section class="panel">
+    <h2>Visual field mapping</h2>
+    <p class="hint">Use Single Field for direct mappings or Template to combine fields with placeholders such as <code>{ProductDetailPageTitle} — {ProductDetailVariant}</code>. Regex is optional and runs after either mode.</p>
+    <div class="rule-row header"><span>Target</span><span>Mode</span><span>Source or template</span><span>Optional regex</span><span>Sample result</span><span></span></div>
+    <div id="standardRules"></div>
+    <h3 style="margin-top:14px">Part parameters and additional fields</h3>
+    <div id="parameterRules"></div>
+    <div class="actions">
+      <button id="addParameterBtn" class="secondary" type="button">Add Parameter Mapping</button>
+      <button id="addCustomBtn" class="secondary" type="button">Add Custom Target</button>
+      <button id="previewBtn" type="button">Preview Mapping</button>
+      <button id="buildPlanBtn" type="button">Build Import Plan</button>
+      <button id="saveProfileBtn" type="button">Save Profile</button>
+    </div>
+    <div id="mappingStatus" class="status"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Live preview</h2>
+    <p id="previewMeta" class="hint">Select fields and preview the transformation. No inventory records are modified.</p>
+    <div id="previewTable" class="preview-wrap"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Read-only import plan</h2>
+    <p id="planMeta" class="hint">Build a plan to validate every mapped row and compare part numbers against existing InvenTree parts and supplier parts. This does not modify inventory.</p>
+    <div id="planSummary" class="actions"></div>
+    <div class="actions">
+      <button id="createCategoriesBtn" type="button" disabled>Create Missing Categories</button>
+    </div>
+    <div id="categoryCreationResult" class="status" role="status" aria-live="polite"></div>
+    <div id="planTable" class="preview-wrap"></div>
+  </section>
+
+  <details class="panel">
+    <summary>Source-field catalog ({{ fields|length }} fields)</summary>
+    <p>Select a field to inspect coverage, values, and row context.</p>
+    <div class="preview-wrap">
+      <table>
+        <thead><tr><th>Field</th><th>Coverage</th><th>Types</th><th>Distinct</th><th>Common values</th><th>Samples</th></tr></thead>
+        <tbody>
+          {% for item in fields %}
+          <tr>
+            <td><a href="?field={{ item.field|urlencode }}"><code>{{ item.field }}</code></a></td>
+            <td>{{ item.non_empty_count }}/{{ item.row_count }} ({{ item.coverage_percent }}%)</td>
+            <td>{% for type, count in item.types.items %}{{ type }}: {{ count }}{% if not forloop.last %}<br>{% endif %}{% endfor %}</td>
+            <td>{{ item.distinct_count }}</td>
+            <td><ul class="samples">{% for value in item.top_values %}<li><code>{{ value.value }}</code> × {{ value.count }}</li>{% empty %}<li>—</li>{% endfor %}</ul></td>
+            <td><ul class="samples">{% for sample in item.samples %}<li><a href="?field={{ item.field|urlencode }}#row-{{ sample.row_index }}">#{{ sample.row_index }}</a>: <code>{{ sample.value }}</code></li>{% empty %}<li>—</li>{% endfor %}</ul></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </details>
+
+  {% if selected %}
+  <section class="panel">
+    <h2>Field: <code>{{ selected.field }}</code></h2>
+    <form method="get" class="actions">
+      <input type="hidden" name="field" value="{{ selected.field }}" />
+      <label>Value contains <input name="contains" value="{{ contains }}" placeholder="Filter sample values" /></label>
+      <button type="submit">Apply Filter</button>
+      <a href="?field={{ selected.field|urlencode }}">Clear</a>
+    </form>
+    <p>{{ selected.match_count }} matching rows; showing up to 100.</p>
+    <div class="preview-wrap">
+      <table>
+        <thead><tr><th>Row</th><th>Selected value</th><th>Other fields from this row</th></tr></thead>
+        <tbody>
+          {% for row in selected.rows %}
+          <tr id="row-{{ row.row_index }}">
+            <td>#{{ row.row_index }}</td><td><code>{{ row.value }}</code></td>
+            <td><div class="context">{% for key, value in row.context.items %}<strong>{{ key }}</strong><code>{{ value }}</code>{% endfor %}</div></td>
+          </tr>
+          {% empty %}<tr><td colspan="3">No values match this filter.</td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+  {% endif %}
+
+  {{ field_names|json_script:"source-fields-data" }}
+  {{ field_samples|json_script:"source-samples-data" }}
+  <script>
+    (() => {
+      const body = document.body;
+      const captureId = body.dataset.captureId;
+      const source = body.dataset.source;
+      const captureProfile = body.dataset.captureProfile;
+      const pageType = body.dataset.pageType;
+      const fields = JSON.parse(document.getElementById("source-fields-data").textContent);
+      const samples = JSON.parse(document.getElementById("source-samples-data").textContent);
+      const csrfToken = document.querySelector("[name=csrfmiddlewaretoken]")?.value || "";
+      const basePath = "/plugin/multi-site-importer/";
+      const standardTargets = [
+        ["part_number", "Part Number"], ["name", "Name"], ["description", "Description"],
+        ["category", "Category"], ["subcategory", "Subcategory"], ["variant", "Variant"],
+        ["quantity", "Quantity"], ["notes", "Notes"], ["image_url", "Primary Image URL"]
+      ];
+      let selectedProfileId = null;
+      let profiles = [];
+      let lastPlan = null;
+
+      const $ = (id) => document.getElementById(id);
+      const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
+        "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
+      }[char]));
+
+      function imagePreview(value) {
+        const raw = String(value ?? "").trim();
+        if (!raw) return "—";
+        try {
+          const url = new URL(raw);
+          if (!["http:", "https:"].includes(url.protocol)) throw new Error("Unsupported protocol");
+          const href = escapeHtml(url.href);
+          const commonRasterImage = /\.(?:avif|bmp|gif|jpe?g|png|webp)$/i.test(url.pathname);
+          if (!commonRasterImage) {
+            return `<a href="${href}" target="_blank" rel="noopener noreferrer"><code>${href}</code></a>`;
+          }
+          return `<span class="image-preview">
+            <img src="${href}" alt="Mapped part image preview" loading="lazy" decoding="async" referrerpolicy="no-referrer" />
+            <a href="${href}" target="_blank" rel="noopener noreferrer" title="${href}">Open image</a>
+          </span>`;
+        } catch {
+          return `<code>${escapeHtml(raw)}</code>`;
+        }
+      }
+
+      function setStatus(message, kind="") {
+        const node = $("mappingStatus");
+        node.textContent = message;
+        node.className = `status visible ${kind}`.trim();
+      }
+
+      async function api(path, options={}) {
+        const method = String(options.method || "GET").toUpperCase();
+        const response = await fetch(`${basePath}${path}`, {
+          credentials: "same-origin",
+          ...options,
+          headers: {
+            "Accept":"application/json",
+            ...(options.body ? {"Content-Type":"application/json"} : {}),
+            ...(method !== "GET" && method !== "HEAD" ? {"X-CSRFToken":csrfToken} : {}),
+            ...(options.headers || {})
+          }
+        });
+        const text = await response.text();
+        let data = {};
+        try { data = text ? JSON.parse(text) : {}; } catch { data = {detail:text}; }
+        if (!response.ok) throw new Error(data.detail || JSON.stringify(data) || `HTTP ${response.status}`);
+        return data;
+      }
+
+      function sourceOptions(selected="") {
+        return `<option value="">— Select source field —</option>` + fields.map((field) =>
+          `<option value="${escapeHtml(field)}"${field === selected ? " selected" : ""}>${escapeHtml(field)}</option>`
+        ).join("");
+      }
+
+      function createRuleRow({target="", label="", sourceField="", template="", regex="", removable=false, parameter=false}={}) {
+        const row = document.createElement("div");
+        row.className = "rule-row";
+        row.dataset.parameter = parameter ? "true" : "false";
+        const mode = template ? "template" : "single";
+        const targetControl = removable
+          ? `<input class="rule-target" value="${escapeHtml(target)}" placeholder="${parameter ? "Parameter name" : "Target field"}" />`
+          : `<input class="rule-target" value="${escapeHtml(target)}" readonly title="${escapeHtml(label)}" />`;
+        row.innerHTML = `
+          <label>${escapeHtml(label || (parameter ? "Parameter" : "Custom target"))}${targetControl}</label>
+          <label>Mode<select class="rule-mode"><option value="single"${mode === "single" ? " selected" : ""}>Single Field</option><option value="template"${mode === "template" ? " selected" : ""}>Template</option></select></label>
+          <div>
+            <label class="single-control">Source<select class="rule-source">${sourceOptions(sourceField)}</select></label>
+            <div class="template-control" hidden>
+              <label>Template<textarea class="rule-template" placeholder="{ProductDetailPageTitle} — {ProductDetailVariant}">${escapeHtml(template)}</textarea></label>
+              <div class="insert-controls">
+                <select class="insert-field">${sourceOptions()}</select>
+                <button type="button" class="secondary insert-field-btn">Insert</button>
+              </div>
+            </div>
+          </div>
+          <label>Regex<input class="rule-regex" value="${escapeHtml(regex)}" placeholder="Optional extraction regex" /></label>
+          <output class="rule-sample"></output>
+          ${removable ? '<button type="button" class="danger remove-rule">Remove</button>' : "<span></span>"}
+        `;
+        row.querySelector(".remove-rule")?.addEventListener("click", () => row.remove());
+        row.querySelector(".rule-mode").addEventListener("change", () => {
+          toggleRuleMode(row);
+          updateSample(row);
+        });
+        row.querySelector(".insert-field-btn").addEventListener("click", () => insertTemplateField(row));
+        row.querySelectorAll("input,select,textarea").forEach((node) => node.addEventListener("input", () => updateSample(row)));
+        toggleRuleMode(row);
+        updateSample(row);
+        return row;
+      }
+
+      function toggleRuleMode(row) {
+        const templateMode = row.querySelector(".rule-mode").value === "template";
+        row.querySelector(".single-control").hidden = templateMode;
+        row.querySelector(".template-control").hidden = !templateMode;
+      }
+
+      function insertTemplateField(row) {
+        const field = row.querySelector(".insert-field").value;
+        if (!field) return;
+        const textarea = row.querySelector(".rule-template");
+        const placeholder = `{${field}}`;
+        const start = textarea.selectionStart ?? textarea.value.length;
+        const end = textarea.selectionEnd ?? start;
+        textarea.value = `${textarea.value.slice(0, start)}${placeholder}${textarea.value.slice(end)}`;
+        textarea.focus();
+        textarea.setSelectionRange(start + placeholder.length, start + placeholder.length);
+        updateSample(row);
+      }
+
+      function updateSample(row) {
+        const templateMode = row.querySelector(".rule-mode").value === "template";
+        const sourceField = row.querySelector(".rule-source").value;
+        const pattern = row.querySelector(".rule-regex").value;
+        let value = templateMode
+          ? row.querySelector(".rule-template").value.replace(/\{([^{}]+)\}/g, (_match, field) => String(samples[field.trim()] ?? "").trim()).trim()
+          : String(samples[sourceField] ?? "");
+        if (pattern && value) {
+          try {
+            const match = value.match(new RegExp(pattern));
+            value = match ? String(match[1] ?? match[0] ?? "") : "";
+          } catch {
+            value = "Invalid regex";
+          }
+        }
+        row.querySelector(".rule-sample").textContent = value || "—";
+      }
+
+      function resetRules() {
+        $("standardRules").replaceChildren(...standardTargets.map(([target,label]) => createRuleRow({target,label})));
+        $("parameterRules").replaceChildren();
+      }
+
+      function collectRules() {
+        const rules = {};
+        for (const row of document.querySelectorAll(".rule-row:not(.header)")) {
+          let target = row.querySelector(".rule-target")?.value.trim();
+          const templateMode = row.querySelector(".rule-mode").value === "template";
+          const sourceField = row.querySelector(".rule-source")?.value.trim();
+          const template = row.querySelector(".rule-template")?.value || "";
+          const regex = row.querySelector(".rule-regex")?.value.trim() || "";
+          if (!target || (templateMode ? !template.trim() : !sourceField)) continue;
+          if (row.dataset.parameter === "true" && !target.startsWith("parameter.")) target = `parameter.${target}`;
+          rules[target] = templateMode ? {template, regex} : {source_field:sourceField, regex};
+        }
+        return rules;
+      }
+
+      function applyRules(rules={}) {
+        resetRules();
+        for (const [target, rule] of Object.entries(rules || {})) {
+          const standard = Array.from($("standardRules").children).find((row) => row.querySelector(".rule-target").value === target);
+          if (standard) {
+            standard.querySelector(".rule-mode").value = rule.template ? "template" : "single";
+            standard.querySelector(".rule-source").value = rule.source_field || rule.sourceField || "";
+            standard.querySelector(".rule-template").value = rule.template || "";
+            standard.querySelector(".rule-regex").value = rule.regex || "";
+            toggleRuleMode(standard);
+            updateSample(standard);
+            continue;
+          }
+          const parameter = target.startsWith("parameter.");
+          const displayTarget = parameter ? target.slice("parameter.".length) : target;
+          $("parameterRules").append(createRuleRow({
+            target:displayTarget, sourceField:rule.source_field || rule.sourceField || "",
+            template:rule.template || "", regex:rule.regex || "", removable:true, parameter
+          }));
+        }
+      }
+
+      function profilePayload() {
+        const name = $("profileName").value.trim();
+        if (!name) throw new Error("Profile name is required.");
+        const rules = collectRules();
+        if (!Object.keys(rules).length) throw new Error("Map at least one source field.");
+        return {
+          name, source, capture_profile:captureProfile, page_type:pageType,
+          host_pattern:$("hostPattern").value.trim(), path_pattern:$("pathPattern").value.trim(),
+          priority:Number($("profilePriority").value || 100),
+          is_active:$("profileActive").value === "true", rules
+        };
+      }
+
+      function renderProfiles() {
+        $("profileSelect").innerHTML = '<option value="">New profile</option>' + profiles.map((profile) =>
+          `<option value="${profile.pk}">${escapeHtml(profile.name)} (#${profile.pk})</option>`
+        ).join("");
+        if (selectedProfileId) $("profileSelect").value = String(selectedProfileId);
+      }
+
+      function loadProfile(profile) {
+        selectedProfileId = profile?.pk || null;
+        $("profileName").value = profile?.name || `${source} ${captureProfile} mapping`;
+        $("profilePriority").value = profile?.priority ?? 100;
+        $("hostPattern").value = profile?.host_pattern || "";
+        $("pathPattern").value = profile?.path_pattern || "";
+        $("profileActive").value = String(profile?.is_active ?? true);
+        applyRules(profile?.rules || {});
+        $("deleteProfileBtn").disabled = !selectedProfileId;
+        renderProfiles();
+        setStatus(profile ? `Loaded profile #${profile.pk}.` : "New profile ready.");
+      }
+
+      async function refreshProfiles() {
+        const query = new URLSearchParams({source, capture_profile:captureProfile, page_type:pageType});
+        const result = await api(`mapping-profiles/?${query}`);
+        profiles = Array.isArray(result) ? result : (result.results || []);
+        renderProfiles();
+      }
+
+      function renderPreview(items) {
+        const container = $("previewTable");
+        if (!items?.length) { container.innerHTML = "<p>No preview rows returned.</p>"; return; }
+        const keys = Array.from(new Set(items.flatMap((item) => Object.keys(item))));
+        container.innerHTML = `<table><thead><tr><th>Row</th>${keys.map((key) => `<th>${escapeHtml(key)}</th>`).join("")}</tr></thead>
+          <tbody>${items.map((item,index) => `<tr><td>${index + 1}</td>${keys.map((key) =>
+            `<td>${key === "image_url" ? imagePreview(item[key]) : `<code>${escapeHtml(item[key] ?? "")}</code>`}</td>`
+          ).join("")}</tr>`).join("")}</tbody></table>`;
+      }
+
+      function renderPlan(plan) {
+        lastPlan = plan;
+        const summary = plan.summary || {};
+        $("planSummary").innerHTML = [
+          ["Create", summary.create || 0], ["Update", summary.update || 0],
+          ["Conflict", summary.conflict || 0], ["Error", summary.error || 0],
+          ["Rows with warnings", summary.warning_rows || 0]
+        ].map(([label,value]) => `<span class="scope"><strong>${escapeHtml(label)}:</strong> ${value}</span>`).join("");
+        $("planMeta").textContent = plan.ready
+          ? `Plan is ready: ${plan.row_count} rows checked. No inventory was modified.`
+          : `Plan requires attention: ${plan.row_count} rows checked. Resolve conflicts and errors before execution.`;
+        const missingPaths = plan.missing_category_paths || [];
+        $("createCategoriesBtn").disabled = !plan.can_create_categories;
+        $("createCategoriesBtn").title = missingPaths.length
+          ? missingPaths.map((item) => item.path).join("\n")
+          : "No mapped category paths are missing.";
+        const rows = plan.rows || [];
+        $("planTable").innerHTML = `<table><thead><tr>
+          <th>Row</th><th>Action</th><th>Part Number</th><th>Name</th><th>Category</th>
+          <th>Image</th><th>Parameters</th><th>Existing matches</th><th>Messages</th>
+        </tr></thead><tbody>${rows.map((row) => {
+          const partMatches = (row.existing_parts || []).map((item) => `Part #${item.pk}: ${item.IPN || ""} ${item.name || ""}`);
+          const supplierMatches = (row.existing_supplier_parts || []).map((item) => `Supplier part #${item.pk}: ${item.SKU || ""} → Part #${item.part_id || ""}`);
+          const categoryMatches = (row.category_matches || []).map((item) => `Category #${item.pk}: ${item.path || item.name || ""}`);
+          const messages = [
+            ...(row.errors || []).map((item) => `ERROR: ${item}`),
+            ...(row.warnings || []).map((item) => `Warning: ${item}`)
+          ];
+          const category = [row.category, row.subcategory].filter(Boolean).join(" > ");
+          return `<tr><td>${row.row_index + 1}</td><td><strong>${escapeHtml(row.action)}</strong></td>
+            <td><code>${escapeHtml(row.part_number)}</code></td><td>${escapeHtml(row.name)}</td>
+            <td>${escapeHtml(category)}</td><td>${imagePreview(row.mapped?.image_url)}</td><td>${row.parameter_count || 0}</td>
+            <td><code>${escapeHtml([...partMatches,...supplierMatches,...categoryMatches].join("\n") || "—")}</code></td>
+            <td><code>${escapeHtml(messages.join("\n") || "—")}</code></td></tr>`;
+        }).join("")}</tbody></table>`;
+      }
+
+      async function preview() {
+        const rules = collectRules();
+        if (!Object.keys(rules).length) throw new Error("Map at least one source field before previewing.");
+        const result = await api(`captures/${captureId}/preview/`, {method:"POST", body:JSON.stringify({rules})});
+        renderPreview(result.items);
+        $("previewMeta").textContent = `Showing ${result.preview_count} of ${result.row_count} captured rows. Preview only; inventory was not modified.`;
+        setStatus("Mapping preview updated.", "ok");
+      }
+
+      async function buildPlan({announce=true}={}) {
+        const rules = collectRules();
+        if (!Object.keys(rules).length) throw new Error("Map at least one source field before building a plan.");
+        if (announce) setStatus("Building read-only import plan…");
+        const result = await api(`captures/${captureId}/plan/`, {method:"POST", body:JSON.stringify({rules})});
+        renderPlan(result);
+        if (announce) {
+          setStatus(result.ready ? "Import plan is ready." : "Import plan contains issues to resolve.", result.ready ? "ok" : "error");
+        }
+        return result;
+      }
+
+      async function createMissingCategories() {
+        const missingPaths = lastPlan?.missing_category_paths || [];
+        if (!missingPaths.length) throw new Error("Build a plan containing missing categories first.");
+        const pathList = missingPaths.map((item) => `• ${item.path}`).join("\n");
+        if (!confirm(`Create these missing InvenTree category paths?\n\n${pathList}\n\nNo parts will be created.`)) return;
+        const rules = collectRules();
+        const button = $("createCategoriesBtn");
+        const resultNode = $("categoryCreationResult");
+        button.disabled = true;
+        button.textContent = "Creating Categories…";
+        resultNode.className = "status visible";
+        resultNode.textContent = `Creating ${missingPaths.length} mapped category path${missingPaths.length === 1 ? "" : "s"}…`;
+        try {
+          const result = await api(`captures/${captureId}/categories/`, {
+            method:"POST",
+            body:JSON.stringify({rules, confirm:true})
+          });
+          const createdPaths = (result.created || []).map((item) => `Created: ${item.path} (#${item.pk})`);
+          const reusedPaths = (result.existing || []).map((item) => `Reused: ${item.path} (#${item.pk})`);
+          const rebuiltPlan = await buildPlan({announce:false});
+          const unresolved = rebuiltPlan.missing_category_paths || [];
+          resultNode.className = `status visible ${unresolved.length ? "error" : "ok"}`;
+          resultNode.textContent = [
+            `Category creation finished: ${result.created_count} created, ${result.existing_count} existing segments reused.`,
+            ...createdPaths,
+            ...reusedPaths,
+            unresolved.length
+              ? `Still unresolved: ${unresolved.map((item) => item.path).join(", ")}`
+              : "Verification succeeded: all mapped category paths now exist."
+          ].join("\n");
+          setStatus(
+            unresolved.length ? "Category creation completed, but some paths remain unresolved." : "Categories created and verified.",
+            unresolved.length ? "error" : "ok"
+          );
+        } catch (error) {
+          resultNode.className = "status visible error";
+          resultNode.textContent = `Category creation failed: ${error.message}`;
+          throw error;
+        } finally {
+          button.textContent = "Create Missing Categories";
+          button.disabled = !(lastPlan?.can_create_categories);
+        }
+      }
+
+      async function saveProfile() {
+        const payload = profilePayload();
+        const path = selectedProfileId ? `mapping-profiles/${selectedProfileId}/` : "mapping-profiles/";
+        const profile = await api(path, {method:selectedProfileId ? "PATCH" : "POST", body:JSON.stringify(payload)});
+        selectedProfileId = profile.pk;
+        await refreshProfiles();
+        loadProfile(profile);
+        setStatus(`Profile #${profile.pk} saved.`, "ok");
+      }
+
+      $("addParameterBtn").addEventListener("click", () => $("parameterRules").append(createRuleRow({removable:true,parameter:true})));
+      $("addCustomBtn").addEventListener("click", () => $("parameterRules").append(createRuleRow({removable:true})));
+      $("previewBtn").addEventListener("click", () => preview().catch((error) => setStatus(error.message, "error")));
+      $("buildPlanBtn").addEventListener("click", () => buildPlan().catch((error) => setStatus(error.message, "error")));
+      $("createCategoriesBtn").addEventListener("click", () => createMissingCategories().catch((error) => setStatus(error.message, "error")));
+      $("saveProfileBtn").addEventListener("click", () => saveProfile().catch((error) => setStatus(error.message, "error")));
+      $("newProfileBtn").addEventListener("click", () => loadProfile(null));
+      $("loadProfileBtn").addEventListener("click", () => {
+        const profile = profiles.find((item) => String(item.pk) === $("profileSelect").value);
+        if (profile) loadProfile(profile); else loadProfile(null);
+      });
+      $("deleteProfileBtn").addEventListener("click", async () => {
+        if (!selectedProfileId || !confirm("Delete this mapping profile?")) return;
+        try {
+          await api(`mapping-profiles/${selectedProfileId}/`, {method:"DELETE"});
+          await refreshProfiles();
+          loadProfile(null);
+          setStatus("Profile deleted.", "ok");
+        } catch (error) { setStatus(error.message, "error"); }
+      });
+
+      resetRules();
+      refreshProfiles().catch((error) => setStatus(`Could not load profiles: ${error.message}`, "error"));
+    })();
+  </script>
+</body>
+</html>
