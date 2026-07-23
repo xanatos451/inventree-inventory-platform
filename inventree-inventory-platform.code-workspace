@@ -1,0 +1,50 @@
+{
+  "folders": [
+    {
+      "name": "Extensions - Multi-Site Capture",
+      "path": "extensions/chrome-multi-site-inventree-export"
+    },
+    {
+      "name": "Extensions - SVG Capture",
+      "path": "extensions/chrome-svg-capture-extension"
+    },
+    {
+      "name": "Plugins - InvenTree Importer",
+      "path": "plugins/inventree-multi-site-importer"
+    },
+    {
+      "name": "Shared Scripts",
+      "path": "scripts"
+    }
+  ],
+  "settings": {
+    "files.eol": "\n",
+    "files.insertFinalNewline": true,
+    "editor.insertSpaces": true,
+    "editor.tabSize": 2,
+    "[python]": {
+      "editor.tabSize": 4
+    },
+    "python.testing.unittestEnabled": true,
+    "python.testing.pytestEnabled": false,
+    "python.testing.unittestArgs": [
+      "-v",
+      "-s",
+      "plugins/inventree-multi-site-importer/tests",
+      "-p",
+      "test_*.py"
+    ],
+    "search.exclude": {
+      "**/.artifacts/**": true,
+      "**/node_modules/**": true,
+      "**/__pycache__/**": true
+    }
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-python.python",
+      "ms-python.vscode-pylance",
+      "ms-playwright.playwright"
+    ]
+  }
+}

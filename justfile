@@ -2,9 +2,9 @@
 
 set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
 
-ext_dir := "chrome-multi-site-inventree-export"
-svg_ext_dir := "chrome-svg-capture-extension"
-plugin_dir := "inventree-multi-site-importer"
+ext_dir := "extensions/chrome-multi-site-inventree-export"
+svg_ext_dir := "extensions/chrome-svg-capture-extension"
+plugin_dir := "plugins/inventree-multi-site-importer"
 
 # Show all available recipes.
 @default:

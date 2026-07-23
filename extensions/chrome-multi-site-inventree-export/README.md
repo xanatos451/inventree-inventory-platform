@@ -1,6 +1,6 @@
 # Multi-Site Inventory Capture (Chrome Extension)
 
-This is the browser-side capture companion for the [Multi-Site Supplier Importer InvenTree plugin](../inventree-multi-site-importer/README.md).
+This is the browser-side capture companion for the [Multi-Site Supplier Importer InvenTree plugin](../../plugins/inventree-multi-site-importer/README.md).
 
 The extension deliberately does not create or update InvenTree parts. It captures browser-visible supplier data and submits a versioned raw payload to the plugin's import queue. Mapping, validation, category and parameter handling, matching, images, and inventory writes are server-owned concerns.
 
@@ -10,7 +10,7 @@ The extension deliberately does not create or update InvenTree parts. It capture
 
 Before configuring the extension:
 
-1. Package and install the [InvenTree plugin](../inventree-multi-site-importer/README.md#build-a-wheel).
+1. Package and install the [InvenTree plugin](../../plugins/inventree-multi-site-importer/README.md#build-a-wheel).
 2. Enable custom plugins in the InvenTree server configuration.
 3. Activate **Multi-Site Supplier Importer**.
 4. Enable InvenTree's **URL integration** and **app integration** global plugin settings.
@@ -18,14 +18,14 @@ Before configuring the extension:
 6. Create a dedicated InvenTree user and API token for capture submission.
 7. Verify `/plugin/multi-site-importer/health/` using that token.
 
-For Docker installations, keep the plugin in `plugins.txt` or the persistent plugin directory and enable **Check plugins on startup**. Full commands and alternatives are in the [plugin installation guide](../inventree-multi-site-importer/README.md#installation-options).
+For Docker installations, keep the plugin in `plugins.txt` or the persistent plugin directory and enable **Check plugins on startup**. Full commands and alternatives are in the [plugin installation guide](../../plugins/inventree-multi-site-importer/README.md#installation-options).
 
 ## Install the Chrome extension
 
 1. Open `chrome://extensions`.
 2. Enable **Developer mode**.
 3. Select **Load unpacked**.
-4. Select the `chrome-multi-site-inventree-export` directory.
+4. Select the `extensions/chrome-multi-site-inventree-export` directory.
 5. Pin **Multi-Site Inventory Capture** to the Chrome toolbar if desired.
 
 When distributing a packaged extension, use the release artifact produced by your normal Chrome-extension signing process. Do not include an InvenTree API token in the extension source or package.

@@ -1,6 +1,6 @@
 # Multi-Site Supplier Importer for InvenTree
 
-Server-side companion to the [Multi-Site Inventory Capture Chrome extension](../chrome-multi-site-inventree-export/README.md). The extension reads supplier pages; this plugin stores raw captures, exposes field-inspection and mapping tools, and provides the boundary for future inventory writes.
+Server-side companion to the [Multi-Site Inventory Capture Chrome extension](../../extensions/chrome-multi-site-inventree-export/README.md). The extension reads supplier pages; this plugin stores raw captures, exposes field-inspection and mapping tools, and provides the boundary for future inventory writes.
 
 > Current scope: version `0.1.11` queues captures, provides a visual mapping-profile editor with multi-field templates and image thumbnails, builds read-only import plans against existing InvenTree identifiers, and can explicitly create missing mapped category hierarchies. It deliberately does **not yet create or update InvenTree parts**.
 
@@ -30,7 +30,7 @@ See InvenTree's official [plugin installation guide](https://docs.inventree.org/
 
 ## Build a wheel
 
-Run these commands from `inventree-multi-site-importer` on a development machine, not inside the browser-extension directory:
+Run these commands from `plugins/inventree-multi-site-importer` on a development machine, not inside the browser-extension directory:
 
 ```bash
 python scripts/build_plugin.py --clean
@@ -85,7 +85,7 @@ Run `just check` to test both the extension and plugin and produce the wheel, or
 Once the repository is available from your InvenTree server, add a pinned VCS requirement to InvenTree's `plugins.txt`:
 
 ```text
-inventree-multi-site-importer @ git+https://github.com/xanatos451/chrome_extensions.git@<commit-or-tag>#subdirectory=inventree-multi-site-importer
+inventree-multi-site-importer @ git+https://github.com/xanatos451/inventree-inventory-platform.git@<commit-or-tag>#subdirectory=plugins/inventree-multi-site-importer
 ```
 
 Replace `<commit-or-tag>` with a release tag or commit hash. Pinning prevents an unreviewed branch update from being installed automatically.
@@ -121,7 +121,7 @@ As an InvenTree superuser:
 1. Open **Admin → Plugin Settings**.
 2. Choose the plugin installation action.
 3. Enter package name `inventree-multi-site-importer`.
-4. Supply a reachable VCS source or package source. For this monorepo, use the Git URL with `#subdirectory=inventree-multi-site-importer` shown above.
+4. Supply a reachable VCS source or package source. For this monorepo, use the Git URL with `#subdirectory=plugins/inventree-multi-site-importer` shown above.
 5. Confirm installation.
 6. Run the normal update/migration process if your deployment does not do so automatically.
 7. Restart both server and worker processes.

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "inventree-multi-site-importer"
 dynamic = ["version"]
-description = "InvenTree plugin for staging and mapping supplier captures from the Multi-Site Inventory Exporter browser extension"
+description = "InvenTree plugin for staging and mapping supplier captures from the Multi-Site Inventory Capture browser extension"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

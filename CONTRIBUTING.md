@@ -2,6 +2,8 @@
 
 Thanks for contributing to this repository.
 
+This repository is organized as an inventory platform with multiple components: browser capture extensions, an InvenTree importer plugin, and shared scripts.
+
 ## Workflow
 
 1. Create a branch from `main`.
@@ -11,7 +13,7 @@ Thanks for contributing to this repository.
 
 ## Local Validation
 
-From `chrome-multi-site-inventree-export`:
+From `extensions/chrome-multi-site-inventree-export`:
 
 ```bash
 npm ci
@@ -22,7 +24,7 @@ npm run validate
 The InvenTree plugin has dependency-free contract and mapping tests:
 
 ```bash
-cd inventree-multi-site-importer
+cd plugins/inventree-multi-site-importer
 python -m unittest discover -s tests -v
 python scripts/build_plugin.py --clean
 ```
@@ -74,7 +76,7 @@ After changing pinned SHAs, run `just check` before opening a pull request.
 - Keep changes scoped and easy to review.
 - Update documentation when behavior or setup changes.
 - Reference related issues using keywords like `Fixes #123` when applicable.
-- Include screenshots/GIFs for UI changes to popup behavior.
+- Include screenshots/GIFs for UI changes to extension or workspace views.
 
 ## Commit Guidance
 

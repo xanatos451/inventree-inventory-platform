@@ -12,7 +12,17 @@ import zipfile
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
-WORKSPACE_ROOT = PLUGIN_ROOT.parent
+
+
+def resolve_workspace_root() -> Path:
+    """Find the repository root from the plugin package location."""
+    for candidate in (PLUGIN_ROOT, *PLUGIN_ROOT.parents):
+        if (candidate / "justfile").exists() and (candidate / ".github").exists():
+            return candidate
+    return PLUGIN_ROOT.parent
+
+
+WORKSPACE_ROOT = resolve_workspace_root()
 ARTIFACT_ROOT = WORKSPACE_ROOT / ".artifacts"
 REQUIRED_WHEEL_FILES = {
     "inventree_multi_site_importer/planning.py",

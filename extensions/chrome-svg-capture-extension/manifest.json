@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "SVG Domain Capture",
+  "name": "Inventory Platform SVG Capture",
   "version": "1.0.0",
   "description": "Capture SVG files from opened pages and save them into domain-based folders.",
   "permissions": [

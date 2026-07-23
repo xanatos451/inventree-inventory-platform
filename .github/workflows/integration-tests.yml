@@ -1,4 +1,4 @@
-name: Extension and InvenTree Plugin Tests
+name: Inventory Platform Tests
 
 permissions:
   contents: read
@@ -8,9 +8,9 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/**"
-      - "chrome-multi-site-inventree-export/**"
-      - "chrome-svg-capture-extension/**"
-      - "inventree-multi-site-importer/**"
+      - "extensions/chrome-multi-site-inventree-export/**"
+      - "extensions/chrome-svg-capture-extension/**"
+      - "plugins/inventree-multi-site-importer/**"
       - "scripts/**"
       - ".gitignore"
       - ".editorconfig"
@@ -22,9 +22,9 @@ on:
     branches: [main]
     paths:
       - ".github/workflows/**"
-      - "chrome-multi-site-inventree-export/**"
-      - "chrome-svg-capture-extension/**"
-      - "inventree-multi-site-importer/**"
+      - "extensions/chrome-multi-site-inventree-export/**"
+      - "extensions/chrome-svg-capture-extension/**"
+      - "plugins/inventree-multi-site-importer/**"
       - "scripts/**"
       - ".gitignore"
       - ".editorconfig"
@@ -51,7 +51,7 @@ jobs:
         run: python scripts/check_secrets.py
 
   javascript-syntax:
-    name: JavaScript syntax
+    name: Platform JavaScript syntax
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -63,16 +63,16 @@ jobs:
           node-version: "20"
 
       - name: Check capture extension scripts
-        working-directory: chrome-multi-site-inventree-export
+        working-directory: extensions/chrome-multi-site-inventree-export
         run: npm run test:syntax
 
       - name: Check SVG capture extension scripts
         run: |
-          node --check chrome-svg-capture-extension/background.js
-          node --check chrome-svg-capture-extension/popup.js
+          node --check extensions/chrome-svg-capture-extension/background.js
+          node --check extensions/chrome-svg-capture-extension/popup.js
 
   extension-integration:
-    name: Capture extension integration (${{ matrix.os }})
+    name: Supplier capture integration (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -80,7 +80,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     defaults:
       run:
-        working-directory: chrome-multi-site-inventree-export
+        working-directory: extensions/chrome-multi-site-inventree-export
 
     steps:
       - name: Checkout
@@ -91,7 +91,7 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: chrome-multi-site-inventree-export/package-lock.json
+          cache-dependency-path: extensions/chrome-multi-site-inventree-export/package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -123,7 +123,7 @@ jobs:
           retention-days: 7
 
   inventree-plugin:
-    name: InvenTree plugin contract (Python ${{ matrix.python-version }})
+    name: InvenTree importer plugin contract (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -131,7 +131,7 @@ jobs:
         python-version: ["3.10", "3.12"]
     defaults:
       run:
-        working-directory: inventree-multi-site-importer
+        working-directory: plugins/inventree-multi-site-importer
 
     steps:
       - name: Checkout
@@ -142,7 +142,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
-          cache-dependency-path: inventree-multi-site-importer/pyproject.toml
+          cache-dependency-path: plugins/inventree-multi-site-importer/pyproject.toml
 
       - name: Build and verify distributable wheel
         run: python scripts/build_plugin.py --clean
