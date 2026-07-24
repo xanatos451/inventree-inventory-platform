@@ -27,7 +27,7 @@
     .rule-row output { min-height:36px; max-height:86px; overflow:auto; padding:8px; border:1px solid var(--border); border-radius:6px; background:#f8fafb; white-space:pre-wrap; overflow-wrap:anywhere; }
     .status { display:none; border-radius:6px; margin-top:10px; padding:9px; background:#e8f3f7; }
     .status.visible { display:block; } .status.ok { background:#e8f6ed; color:#236738; } .status.error { background:#fdebea; color:#8a241e; }
-    #categoryCreationResult { white-space:pre-wrap; }
+    #categoryCreationResult, #partCreationResult, #detailImportResult, #imagePrefetchResult { white-space:pre-wrap; }
     .preview-wrap { overflow:auto; max-height:500px; }
     .image-preview { display:grid; gap:5px; min-width:130px; }
     .image-preview img { width:120px; height:90px; object-fit:contain; border:1px solid var(--border); border-radius:5px; background:white; }
@@ -58,10 +58,29 @@
   data-source="{{ capture.source }}"
   data-capture-profile="{{ capture.capture_profile }}"
   data-page-type="{{ capture.page_type }}"
+  data-row-count="{{ capture.row_count }}"
 >
   {% csrf_token %}
   <h1>Capture #{{ capture.pk }} mapping workspace</h1>
   <div class="meta">{{ capture.source }} · {{ capture.capture_profile }} · {{ capture.page_type }} · {{ capture.row_count }} rows · {{ capture.page_title }}</div>
+
+  <section class="panel">
+    <h2>Select dataset rows</h2>
+    <p class="hint">Choose the rows included in preview, planning, category creation, and part creation. The stored capture is not modified.</p>
+    <div class="actions">
+      <button id="selectAllRowsBtn" type="button">Select All</button>
+      <button id="deselectAllRowsBtn" class="secondary" type="button">Deselect All</button>
+      <button id="selectPageRowsBtn" class="secondary" type="button">Select Visible</button>
+      <button id="deselectPageRowsBtn" class="secondary" type="button">Deselect Visible</button>
+      <span id="selectionCount" class="scope"></span>
+    </div>
+    <div id="datasetTable" class="preview-wrap"></div>
+    <div class="actions">
+      <button id="previousDatasetPageBtn" class="secondary" type="button">Previous</button>
+      <span id="datasetPageMeta" class="scope"></span>
+      <button id="nextDatasetPageBtn" class="secondary" type="button">Next</button>
+    </div>
+  </section>
 
   <section class="panel">
     <h2>Mapping profile</h2>
@@ -109,13 +128,29 @@
   </section>
 
   <section class="panel">
-    <h2>Read-only import plan</h2>
+    <h2>Import plan and part creation</h2>
     <p id="planMeta" class="hint">Build a plan to validate every mapped row and compare part numbers against existing InvenTree parts and supplier parts. This does not modify inventory.</p>
     <div id="planSummary" class="actions"></div>
     <div class="actions">
       <button id="createCategoriesBtn" type="button" disabled>Create Missing Categories</button>
+      <button id="createPartsBtn" type="button" disabled>Create New Parts</button>
+      <label>Matching parts
+        <select id="existingPartMode">
+          <option value="update" selected>Update (preserve blanks and primary image)</option>
+          <option value="overwrite">Overwrite mapped fields and primary image</option>
+        </select>
+      </label>
+      <button id="importDetailsBtn" type="button" disabled>Import Notes, Parameters &amp; Images</button>
     </div>
     <div id="categoryCreationResult" class="status" role="status" aria-live="polite"></div>
+    <div id="partCreationResult" class="status" role="status" aria-live="polite"></div>
+    <div id="detailImportResult" class="status" role="status" aria-live="polite"></div>
+    <div class="actions">
+      <button id="prefetchImagesBtn" type="button" disabled>Validate &amp; Prefetch Images</button>
+      <button id="retryFailedImagesBtn" class="secondary" type="button" disabled>Retry Failed Images</button>
+      <button id="excludeFailedImagesBtn" class="danger" type="button" disabled>Exclude Failed &amp; Proceed</button>
+    </div>
+    <div id="imagePrefetchResult" class="status" role="status" aria-live="polite"></div>
     <div id="planTable" class="preview-wrap"></div>
   </section>
 
@@ -176,6 +211,7 @@
       const source = body.dataset.source;
       const captureProfile = body.dataset.captureProfile;
       const pageType = body.dataset.pageType;
+      const rowCount = Number(body.dataset.rowCount || 0);
       const fields = JSON.parse(document.getElementById("source-fields-data").textContent);
       const samples = JSON.parse(document.getElementById("source-samples-data").textContent);
       const csrfToken = document.querySelector("[name=csrfmiddlewaretoken]")?.value || "";
@@ -189,11 +225,60 @@
       let selectedProfileId = null;
       let profiles = [];
       let lastPlan = null;
+      let lastPrefetchFailures = [];
+      let datasetOffset = 0;
+      const datasetPageSize = 100;
+      let visibleDatasetIndices = [];
+      const selectedRowIndices = new Set(Array.from({length:rowCount}, (_value, index) => index));
 
       const $ = (id) => document.getElementById(id);
       const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
         "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
       }[char]));
+
+      function selectedRowsPayload() {
+        return Array.from(selectedRowIndices).sort((left, right) => left - right);
+      }
+
+      function selectionChanged() {
+        lastPlan = null;
+        lastPrefetchFailures = [];
+        $("createCategoriesBtn").disabled = true;
+        $("createPartsBtn").disabled = true;
+        $("importDetailsBtn").disabled = true;
+        $("prefetchImagesBtn").disabled = true;
+        $("retryFailedImagesBtn").disabled = true;
+        $("excludeFailedImagesBtn").disabled = true;
+        $("selectionCount").textContent = `${selectedRowIndices.size} of ${rowCount} selected`;
+        $("planMeta").textContent = "Dataset selection changed. Build a new plan before creating inventory.";
+      }
+
+      async function loadDatasetPage(offset=datasetOffset) {
+        datasetOffset = Math.max(0, Math.min(offset, Math.max(0, rowCount - 1)));
+        const result = await api(`captures/${captureId}/rows/?offset=${datasetOffset}&limit=${datasetPageSize}`);
+        const rows = result.rows || [];
+        visibleDatasetIndices = rows.map((item) => item.row_index);
+        const keys = Array.from(new Set(rows.flatMap((item) => Object.keys(item.values || {})))).slice(0, 8);
+        $("datasetTable").innerHTML = rows.length ? `<table><thead><tr><th>Import</th><th>Row</th>${
+          keys.map((key) => `<th>${escapeHtml(key)}</th>`).join("")
+        }</tr></thead><tbody>${rows.map((item) => `<tr>
+          <td><input class="dataset-row-checkbox" type="checkbox" data-row-index="${item.row_index}" ${selectedRowIndices.has(item.row_index) ? "checked" : ""} /></td>
+          <td>#${item.row_index + 1}</td>${keys.map((key) =>
+            `<td><code>${escapeHtml(typeof item.values?.[key] === "object" ? JSON.stringify(item.values[key]) : item.values?.[key] ?? "")}</code></td>`
+          ).join("")}</tr>`).join("")}</tbody></table>` : "<p>No dataset rows.</p>";
+        document.querySelectorAll(".dataset-row-checkbox").forEach((checkbox) => {
+          checkbox.addEventListener("change", () => {
+            const index = Number(checkbox.dataset.rowIndex);
+            if (checkbox.checked) selectedRowIndices.add(index); else selectedRowIndices.delete(index);
+            selectionChanged();
+          });
+        });
+        const pageEnd = Math.min(rowCount, datasetOffset + rows.length);
+        $("datasetPageMeta").textContent = rowCount ? `Rows ${datasetOffset + 1}–${pageEnd} of ${rowCount}` : "No rows";
+        $("previousDatasetPageBtn").disabled = datasetOffset === 0;
+        $("nextDatasetPageBtn").disabled = datasetOffset + datasetPageSize >= rowCount;
+        $("selectionCount").textContent = `${selectedRowIndices.size} of ${rowCount} selected`;
+      }
 
       function imagePreview(value) {
         const raw = String(value ?? "").trim();
@@ -447,6 +532,23 @@
         $("createCategoriesBtn").title = missingPaths.length
           ? missingPaths.map((item) => item.path).join("\n")
           : "No mapped category paths are missing.";
+        $("createPartsBtn").disabled = !plan.ready || !(summary.create || summary.update);
+        $("createPartsBtn").title = plan.ready
+          ? `${summary.create || 0} new part(s) will be created; ${summary.update || 0} existing match(es) will be skipped.`
+          : "Resolve every plan conflict and error before creating parts.";
+        $("importDetailsBtn").disabled = !plan.ready || !!summary.create || !summary.update;
+        $("importDetailsBtn").title = summary.create
+          ? "Create the selected new parts first."
+          : "Write mapped notes and parameters, then download primary and gallery images.";
+        const plannedImageCount = (plan.rows || []).reduce(
+          (total, row) => total + Number(row.image_count || 0), 0
+        );
+        $("prefetchImagesBtn").disabled = !plan.ready || !plannedImageCount;
+        $("prefetchImagesBtn").title = `${plannedImageCount} mapped image URL${plannedImageCount === 1 ? "" : "s"} will be validated and cached.`;
+        $("retryFailedImagesBtn").disabled = !lastPrefetchFailures.length;
+        $("excludeFailedImagesBtn").disabled = (
+          !lastPrefetchFailures.length || !plan.ready || !!summary.create
+        );
         const rows = plan.rows || [];
         $("planTable").innerHTML = `<table><thead><tr>
           <th>Row</th><th>Action</th><th>Part Number</th><th>Name</th><th>Category</th>
@@ -471,7 +573,9 @@
       async function preview() {
         const rules = collectRules();
         if (!Object.keys(rules).length) throw new Error("Map at least one source field before previewing.");
-        const result = await api(`captures/${captureId}/preview/`, {method:"POST", body:JSON.stringify({rules})});
+        const result = await api(`captures/${captureId}/preview/`, {
+          method:"POST", body:JSON.stringify({rules, selected_row_indices:selectedRowsPayload()})
+        });
         renderPreview(result.items);
         $("previewMeta").textContent = `Showing ${result.preview_count} of ${result.row_count} captured rows. Preview only; inventory was not modified.`;
         setStatus("Mapping preview updated.", "ok");
@@ -481,7 +585,9 @@
         const rules = collectRules();
         if (!Object.keys(rules).length) throw new Error("Map at least one source field before building a plan.");
         if (announce) setStatus("Building read-only import plan…");
-        const result = await api(`captures/${captureId}/plan/`, {method:"POST", body:JSON.stringify({rules})});
+        const result = await api(`captures/${captureId}/plan/`, {
+          method:"POST", body:JSON.stringify({rules, selected_row_indices:selectedRowsPayload()})
+        });
         renderPlan(result);
         if (announce) {
           setStatus(result.ready ? "Import plan is ready." : "Import plan contains issues to resolve.", result.ready ? "ok" : "error");
@@ -504,7 +610,7 @@
         try {
           const result = await api(`captures/${captureId}/categories/`, {
             method:"POST",
-            body:JSON.stringify({rules, confirm:true})
+            body:JSON.stringify({rules, selected_row_indices:selectedRowsPayload(), confirm:true})
           });
           const createdPaths = (result.created || []).map((item) => `Created: ${item.path} (#${item.pk})`);
           const reusedPaths = (result.existing || []).map((item) => `Reused: ${item.path} (#${item.pk})`);
@@ -533,6 +639,224 @@
         }
       }
 
+      async function createParts() {
+        if (!lastPlan?.ready) throw new Error("Build a ready import plan first.");
+        const createCount = lastPlan.summary?.create || 0;
+        const skipCount = lastPlan.summary?.update || 0;
+        if (!confirm(
+          `Create ${createCount} new InvenTree part${createCount === 1 ? "" : "s"}?\n\n` +
+          `${skipCount} existing match${skipCount === 1 ? "" : "es"} will be skipped. ` +
+          "The server will rebuild the live plan before writing. Images, parameters, supplier parts, and stock will not be created in this step."
+        )) return;
+        const button = $("createPartsBtn");
+        const resultNode = $("partCreationResult");
+        button.disabled = true;
+        button.textContent = "Creating Parts…";
+        resultNode.className = "status visible";
+        resultNode.textContent = "Revalidating the plan and creating new parts…";
+        try {
+          const result = await api(`captures/${captureId}/parts/`, {
+            method:"POST",
+            body:JSON.stringify({
+              rules:collectRules(), selected_row_indices:selectedRowsPayload(), confirm:true
+            })
+          });
+          const created = (result.created || []).map((item) =>
+            `Created Part #${item.pk}: ${item.part_number} — ${item.name}`
+          );
+          resultNode.className = "status visible ok";
+          resultNode.textContent = [
+            `Part creation finished: ${result.created_count} created, ${result.skipped_existing_count} existing skipped.`,
+            ...created,
+            "Images, parameters, supplier parts, and stock were not modified."
+          ].join("\n");
+          await buildPlan({announce:false});
+          setStatus("New parts created and the import plan was refreshed.", "ok");
+        } catch (error) {
+          resultNode.className = "status visible error";
+          resultNode.textContent = `Part creation failed: ${error.message}`;
+          throw error;
+        } finally {
+          button.textContent = "Create New Parts";
+          button.disabled = !lastPlan?.ready || !(
+            (lastPlan?.summary?.create || 0) + (lastPlan?.summary?.update || 0)
+          );
+        }
+      }
+
+      function selectedPlanImageUrls() {
+        return Array.from(new Set(
+          (lastPlan?.rows || []).flatMap((row) => row.image_urls || [])
+        ));
+      }
+
+      async function prefetchImages(urls=selectedPlanImageUrls()) {
+        if (!lastPlan?.ready) throw new Error("Build a ready plan before prefetching images.");
+        if (!urls.length) throw new Error("The selected plan contains no image URLs.");
+        const rules = collectRules();
+        const selectedIndices = (lastPlan.rows || []).map((row) => row.row_index);
+        const batches = [];
+        for (let index = 0; index < urls.length; index += 25) {
+          batches.push(urls.slice(index, index + 25));
+        }
+        const button = $("prefetchImagesBtn");
+        const resultNode = $("imagePrefetchResult");
+        button.disabled = true;
+        lastPrefetchFailures = [];
+        resultNode.className = "status visible";
+        let readyCount = 0;
+        try {
+          for (let index = 0; index < batches.length; index += 1) {
+            button.textContent = `Prefetching ${index + 1}/${batches.length}…`;
+            resultNode.textContent = `Validating and caching image batch ${index + 1} of ${batches.length}…`;
+            const result = await api(`captures/${captureId}/images/prefetch/`, {
+              method:"POST",
+              body:JSON.stringify({
+                rules,
+                selected_row_indices:selectedIndices,
+                image_urls:batches[index],
+                confirm:true
+              })
+            });
+            readyCount += Number(result.ready_count || 0);
+            lastPrefetchFailures.push(
+              ...(result.items || []).filter((item) => item.status === "failed")
+            );
+          }
+          resultNode.className = `status visible ${lastPrefetchFailures.length ? "error" : "ok"}`;
+          resultNode.textContent = [
+            `${readyCount} images are validated and cached; ${lastPrefetchFailures.length} failed.`,
+            ...lastPrefetchFailures.map((item) => `FAILED: ${item.error} (${item.url})`),
+            lastPrefetchFailures.length
+              ? "Retry the failures or explicitly exclude them to proceed."
+              : "All selected images are ready for import."
+          ].join("\n");
+          $("retryFailedImagesBtn").disabled = !lastPrefetchFailures.length;
+          $("excludeFailedImagesBtn").disabled = (
+            !lastPrefetchFailures.length || !!lastPlan?.summary?.create
+          );
+          setStatus(
+            lastPrefetchFailures.length ? "Image preflight found failures." : "Image preflight completed.",
+            lastPrefetchFailures.length ? "error" : "ok"
+          );
+        } finally {
+          button.textContent = "Validate & Prefetch Images";
+          button.disabled = !lastPlan?.ready || !selectedPlanImageUrls().length;
+        }
+      }
+
+      async function excludeFailedImagesAndProceed() {
+        if (!lastPrefetchFailures.length) throw new Error("There are no failed images to exclude.");
+        if (lastPlan?.summary?.create) throw new Error("Create the selected parts before proceeding.");
+        const failedUrls = lastPrefetchFailures.map((item) => item.url);
+        if (!confirm(
+          `Exclude ${failedUrls.length} failed image${failedUrls.length === 1 ? "" : "s"} and continue the detail import?\n\n` +
+          "The failed images will not be attached. Cached successful images will still be imported."
+        )) return;
+        await api(`captures/${captureId}/images/exclude-failures/`, {
+          method:"POST",
+          body:JSON.stringify({image_urls:failedUrls, confirm:true})
+        });
+        lastPrefetchFailures = [];
+        $("retryFailedImagesBtn").disabled = true;
+        $("excludeFailedImagesBtn").disabled = true;
+        $("imagePrefetchResult").className = "status visible ok";
+        $("imagePrefetchResult").textContent = `${failedUrls.length} failed images were explicitly excluded.`;
+        await importPartDetails();
+      }
+
+      async function importPartDetails() {
+        if (!lastPlan?.ready || lastPlan.summary?.create) {
+          throw new Error("Create all selected parts and build a ready plan first.");
+        }
+        const partCount = lastPlan.summary?.update || 0;
+        const existingPartMode = $("existingPartMode").value;
+        const importRules = collectRules();
+        const imageLimit = Math.max(1, Number(lastPlan.detail_import_image_limit || 100));
+        const rowLimit = Math.max(1, Number(lastPlan.detail_import_row_limit || 100));
+        const batches = [];
+        let batch = [];
+        let batchImages = 0;
+        for (const row of (lastPlan.rows || [])) {
+          const rowImages = Number(row.image_count || 0);
+          if (rowImages > imageLimit) {
+            throw new Error(
+              `Row ${row.row_index + 1} contains ${rowImages} images, exceeding the per-request limit of ${imageLimit}.`
+            );
+          }
+          if (batch.length && (batchImages + rowImages > imageLimit || batch.length >= rowLimit)) {
+            batches.push(batch);
+            batch = [];
+            batchImages = 0;
+          }
+          batch.push(row.row_index);
+          batchImages += rowImages;
+        }
+        if (batch.length) batches.push(batch);
+        const modeExplanation = existingPartMode === "overwrite"
+          ? "Mapped description and notes may be cleared, and a mapped primary image replaces the current primary image."
+          : "Blank mapped values and an existing primary image are preserved.";
+        if (!confirm(
+          `Import mapped fields, notes, parameters, and images for ${partCount} part${partCount === 1 ? "" : "s"} in ${batches.length} batch${batches.length === 1 ? "" : "es"} using ${existingPartMode} mode?\n\n` +
+          `${modeExplanation} Parameters with matching InvenTree templates are created or updated. ` +
+          "Unrelated parameters and user-created attachments are preserved."
+        )) return;
+        const button = $("importDetailsBtn");
+        const resultNode = $("detailImportResult");
+        button.disabled = true;
+        button.textContent = "Importing Details…";
+        resultNode.className = "status visible";
+        resultNode.textContent = `Starting ${batches.length} detail-import batch${batches.length === 1 ? "" : "es"}…`;
+        try {
+          const total = {
+            part_count:0, part_fields_updated:0, parameters_written:0,
+            primary_images_written:0, gallery_attachments_written:0,
+            cached_images_used:0, excluded_image_count:0,
+            image_error_count:0, image_errors:[]
+          };
+          for (let index = 0; index < batches.length; index += 1) {
+            button.textContent = `Importing Batch ${index + 1}/${batches.length}…`;
+            resultNode.textContent = `Processing batch ${index + 1} of ${batches.length}…`;
+            const result = await api(`captures/${captureId}/details/`, {
+              method:"POST",
+              body:JSON.stringify({
+                rules:importRules,
+                selected_row_indices:batches[index],
+                existing_part_mode:existingPartMode,
+                confirm:true
+              })
+            });
+            for (const key of [
+              "part_count", "part_fields_updated", "parameters_written",
+              "primary_images_written", "gallery_attachments_written",
+              "cached_images_used", "excluded_image_count", "image_error_count"
+            ]) total[key] += Number(result[key] || 0);
+            total.image_errors.push(...(result.image_errors || []));
+          }
+          resultNode.className = `status visible ${total.image_error_count ? "error" : "ok"}`;
+          resultNode.textContent = [
+            `Completed ${batches.length} batches covering ${total.part_count} parts.`,
+            `Mode: ${existingPartMode}. ${total.part_fields_updated} part fields updated; ${total.parameters_written} parameters written.`,
+            `${total.primary_images_written} primary images and ${total.gallery_attachments_written} gallery attachments written.`,
+            `${total.cached_images_used} cached images reused; ${total.excluded_image_count} explicitly excluded.`,
+            ...(total.image_errors || []).map((item) =>
+              `Row ${item.row_index + 1}: ${item.detail} (${item.url})`
+            )
+          ].join("\n");
+          setStatus(
+            total.image_error_count ? "Batched details imported with image download errors." : "Batched part details imported.",
+            total.image_error_count ? "error" : "ok"
+          );
+        } catch (error) {
+          resultNode.className = "status visible error";
+          resultNode.textContent = `Detail import failed: ${error.message}`;
+          throw error;
+        } finally {
+          button.textContent = "Import Notes, Parameters & Images";
+          button.disabled = !lastPlan?.ready || !!lastPlan?.summary?.create || !lastPlan?.summary?.update;
+        }
+      }
+
       async function saveProfile() {
         const payload = profilePayload();
         const path = selectedProfileId ? `mapping-profiles/${selectedProfileId}/` : "mapping-profiles/";
@@ -544,10 +868,37 @@
       }
 
       $("addParameterBtn").addEventListener("click", () => $("parameterRules").append(createRuleRow({removable:true,parameter:true})));
+      $("selectAllRowsBtn").addEventListener("click", async () => {
+        for (let index = 0; index < rowCount; index += 1) selectedRowIndices.add(index);
+        selectionChanged();
+        await loadDatasetPage();
+      });
+      $("deselectAllRowsBtn").addEventListener("click", async () => {
+        selectedRowIndices.clear();
+        selectionChanged();
+        await loadDatasetPage();
+      });
+      $("selectPageRowsBtn").addEventListener("click", async () => {
+        visibleDatasetIndices.forEach((index) => selectedRowIndices.add(index));
+        selectionChanged();
+        await loadDatasetPage();
+      });
+      $("deselectPageRowsBtn").addEventListener("click", async () => {
+        visibleDatasetIndices.forEach((index) => selectedRowIndices.delete(index));
+        selectionChanged();
+        await loadDatasetPage();
+      });
+      $("previousDatasetPageBtn").addEventListener("click", () => loadDatasetPage(datasetOffset - datasetPageSize));
+      $("nextDatasetPageBtn").addEventListener("click", () => loadDatasetPage(datasetOffset + datasetPageSize));
       $("addCustomBtn").addEventListener("click", () => $("parameterRules").append(createRuleRow({removable:true})));
       $("previewBtn").addEventListener("click", () => preview().catch((error) => setStatus(error.message, "error")));
       $("buildPlanBtn").addEventListener("click", () => buildPlan().catch((error) => setStatus(error.message, "error")));
       $("createCategoriesBtn").addEventListener("click", () => createMissingCategories().catch((error) => setStatus(error.message, "error")));
+      $("createPartsBtn").addEventListener("click", () => createParts().catch((error) => setStatus(error.message, "error")));
+      $("prefetchImagesBtn").addEventListener("click", () => prefetchImages().catch((error) => setStatus(error.message, "error")));
+      $("retryFailedImagesBtn").addEventListener("click", () => prefetchImages(lastPrefetchFailures.map((item) => item.url)).catch((error) => setStatus(error.message, "error")));
+      $("excludeFailedImagesBtn").addEventListener("click", () => excludeFailedImagesAndProceed().catch((error) => setStatus(error.message, "error")));
+      $("importDetailsBtn").addEventListener("click", () => importPartDetails().catch((error) => setStatus(error.message, "error")));
       $("saveProfileBtn").addEventListener("click", () => saveProfile().catch((error) => setStatus(error.message, "error")));
       $("newProfileBtn").addEventListener("click", () => loadProfile(null));
       $("loadProfileBtn").addEventListener("click", () => {
@@ -566,6 +917,7 @@
 
       resetRules();
       refreshProfiles().catch((error) => setStatus(`Could not load profiles: ${error.message}`, "error"));
+      loadDatasetPage().catch((error) => setStatus(`Could not load dataset rows: ${error.message}`, "error"));
     })();
   </script>
 </body>

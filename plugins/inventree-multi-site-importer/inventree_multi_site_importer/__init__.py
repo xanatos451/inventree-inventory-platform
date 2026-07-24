@@ -1,3 +1,3 @@
 """Multi-site supplier capture importer for InvenTree."""
 
-PLUGIN_VERSION = "0.1.12"
+PLUGIN_VERSION = "0.1.19"

@@ -29,6 +29,23 @@ _planning = importlib.util.module_from_spec(_planning_spec)
 _planning_spec.loader.exec_module(_planning)
 build_import_plan = _planning.build_import_plan
 
+_selection_spec = importlib.util.spec_from_file_location(
+    "supplier_selection",
+    Path(__file__).parents[1] / "inventree_multi_site_importer" / "selection.py",
+)
+_selection = importlib.util.module_from_spec(_selection_spec)
+_selection_spec.loader.exec_module(_selection)
+select_capture_rows = _selection.select_capture_rows
+
+_remote_images_spec = importlib.util.spec_from_file_location(
+    "supplier_remote_images",
+    Path(__file__).parents[1] / "inventree_multi_site_importer" / "remote_images.py",
+)
+_remote_images = importlib.util.module_from_spec(_remote_images_spec)
+_remote_images_spec.loader.exec_module(_remote_images)
+RemoteImageError = _remote_images.RemoteImageError
+validate_remote_url = _remote_images.validate_remote_url
+
 
 def validate_capture(payload):
     required = ("contract_version", "capture_profile", "source", "captured_at", "page_url", "headers", "rows")
@@ -42,6 +59,32 @@ def validate_capture(payload):
 
 
 class CaptureContractTests(unittest.TestCase):
+    def test_remote_image_url_requires_public_http_address(self):
+        public = lambda *_args: [(2, 1, 6, "", ("93.184.216.34", 443))]
+        private = lambda *_args: [(2, 1, 6, "", ("127.0.0.1", 80))]
+        self.assertEqual(
+            validate_remote_url("https://images.example.test/item.jpg", resolver=public),
+            "https://images.example.test/item.jpg",
+        )
+        with self.assertRaisesRegex(RemoteImageError, "non-public"):
+            validate_remote_url("http://localhost/item.jpg", resolver=private)
+        with self.assertRaisesRegex(RemoteImageError, "HTTP or HTTPS"):
+            validate_remote_url("file:///tmp/item.jpg", resolver=public)
+
+    def test_dataset_selection_preserves_original_row_indices(self):
+        rows = [{"Part": "A"}, {"Part": "B"}, {"Part": "C"}]
+        self.assertEqual(
+            select_capture_rows(rows, [2, 0, 2]),
+            [(2, {"Part": "C"}), (0, {"Part": "A"})],
+        )
+        self.assertEqual(select_capture_rows(rows, []), [])
+
+    def test_dataset_selection_rejects_invalid_indices(self):
+        with self.assertRaisesRegex(ValueError, "outside the dataset"):
+            select_capture_rows([{"Part": "A"}], [1])
+        with self.assertRaisesRegex(ValueError, "must be an integer"):
+            select_capture_rows([{"Part": "A"}], [True])
+
     def test_minimum_capture(self):
         validate_capture({
             "contract_version": "1.0",
@@ -149,6 +192,15 @@ class CaptureContractTests(unittest.TestCase):
         self.assertEqual(plan["summary"]["create"], 1)
         self.assertEqual(plan["summary"]["update"], 1)
         self.assertEqual(plan["summary"]["error"], 1)
+
+    def test_import_plan_retains_selected_capture_row_index(self):
+        plan = build_import_plan([{
+            "_capture_row_index": 41,
+            "part_number": "SELECTED-1",
+            "name": "Selected Part",
+        }])
+        self.assertEqual(plan["rows"][0]["row_index"], 41)
+        self.assertNotIn("_capture_row_index", plan["rows"][0]["mapped"])
 
     def test_import_plan_marks_duplicate_identifiers_as_conflicts(self):
         plan = build_import_plan([

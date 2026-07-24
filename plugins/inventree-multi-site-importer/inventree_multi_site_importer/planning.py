@@ -70,6 +70,7 @@ def build_import_plan(items, part_lookup=None, supplier_lookup=None, category_lo
 
     for index, item in enumerate(items):
         item = dict(item or {})
+        source_row_index = item.pop("_capture_row_index", index)
         part_number = _text(item.get("part_number") or item.get("IPN"))
         name = _text(item.get("name"))
         category = _text(item.get("category"))
@@ -143,7 +144,7 @@ def build_import_plan(items, part_lookup=None, supplier_lookup=None, category_lo
             action = "create"
 
         rows.append({
-            "row_index": index,
+            "row_index": source_row_index,
             "action": action,
             "part_number": part_number,
             "name": name,

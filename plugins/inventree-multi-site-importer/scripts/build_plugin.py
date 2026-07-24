@@ -28,6 +28,8 @@ REQUIRED_WHEEL_FILES = {
     "inventree_multi_site_importer/planning.py",
     "inventree_multi_site_importer/migrations/0001_initial.py",
     "inventree_multi_site_importer/migrations/0002_capture_profiles.py",
+    "inventree_multi_site_importer/migrations/0003_alter_captureimport_id_alter_mappingprofile_id.py",
+    "inventree_multi_site_importer/migrations/0004_imageprefetch.py",
     "inventree_multi_site_importer/templates/inventree_multi_site_importer/capture_workspace.html",
 }
 

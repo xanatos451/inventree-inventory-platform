@@ -29,6 +29,24 @@ class MultiSiteImporterPlugin(AppMixin, SettingsMixin, UrlsMixin, InvenTreePlugi
             "default": 5000,
             "validator": int,
         },
+        "MAX_IMAGE_DOWNLOAD_BYTES": {
+            "name": "Maximum remote image size",
+            "description": "Maximum bytes downloaded for each product image.",
+            "default": 10485760,
+            "validator": int,
+        },
+        "MAX_DETAIL_IMAGE_DOWNLOADS": {
+            "name": "Maximum images per detail import",
+            "description": "Maximum remote image downloads attempted in one request.",
+            "default": 100,
+            "validator": int,
+        },
+        "IMAGE_PREFETCH_CACHE_DAYS": {
+            "name": "Image prefetch cache retention",
+            "description": "Days to retain cached image preflight files.",
+            "default": 7,
+            "validator": int,
+        },
     }
 
     def setup_urls(self):

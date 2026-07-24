@@ -1,5 +1,7 @@
 from django.conf import settings
 from django.db import models
+from django.db.models.signals import post_delete
+from django.dispatch import receiver
 
 
 class MappingProfile(models.Model):
@@ -76,3 +78,54 @@ class CaptureImport(models.Model):
 
     def __str__(self):
         return f"{self.source} capture #{self.pk} ({self.row_count} rows)"
+
+
+def image_prefetch_upload_to(instance, filename):
+    return f"multi-site-importer/prefetch/{instance.capture_id}/{filename}"
+
+
+class ImagePrefetch(models.Model):
+    """Capture-scoped cached image and its validation state."""
+
+    class Status(models.TextChoices):
+        READY = "ready", "Ready"
+        FAILED = "failed", "Failed"
+        EXCLUDED = "excluded", "Excluded"
+
+    capture = models.ForeignKey(
+        CaptureImport,
+        on_delete=models.CASCADE,
+        related_name="image_prefetches",
+    )
+    url = models.URLField(max_length=2000)
+    status = models.CharField(max_length=20, choices=Status.choices)
+    cached_file = models.FileField(
+        upload_to=image_prefetch_upload_to,
+        blank=True,
+        null=True,
+    )
+    original_filename = models.CharField(max_length=255, blank=True)
+    content_type = models.CharField(max_length=100, blank=True)
+    file_size = models.PositiveBigIntegerField(default=0)
+    error = models.CharField(max_length=500, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = "inventree_multi_site_importer"
+        ordering = ["url", "pk"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["capture", "url"],
+                name="unique_capture_prefetch_url",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.capture_id}: {self.status} {self.url}"
+
+
+@receiver(post_delete, sender=ImagePrefetch)
+def delete_image_prefetch_file(sender, instance, **kwargs):
+    if instance.cached_file:
+        instance.cached_file.delete(save=False)

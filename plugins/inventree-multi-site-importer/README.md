@@ -2,7 +2,7 @@
 
 Server-side companion to the [Multi-Site Inventory Capture Chrome extension](../../extensions/chrome-multi-site-inventree-export/README.md). The extension reads supplier pages; this plugin stores raw captures, exposes field-inspection and mapping tools, and provides the boundary for future inventory writes.
 
-> Current scope: version `0.1.12` queues captures, provides a visual mapping-profile editor with multi-field templates and image galleries, builds read-only import plans against existing InvenTree identifiers, and can explicitly create missing mapped category hierarchies. It deliberately does **not yet create or update InvenTree parts**.
+> Current scope: version `0.1.19` queues captures, provides paged dataset selection and visual mapping, creates parts, validates and caches remote images before import, and automatically batches updates or overwrites of mapped fields, notes, parameters, primary images, and gallery attachments.
 
 ## Requirements
 
@@ -54,7 +54,7 @@ Omit `--clean` to retain existing artifacts. The script only permits output belo
 The distributable artifact is created under the consolidated repository output directory:
 
 ```text
-.artifacts/plugin/inventree_multi_site_importer-0.1.12-py3-none-any.whl
+.artifacts/plugin/inventree_multi_site_importer-0.1.19-py3-none-any.whl
 ```
 
 Before distributing it, run:
@@ -109,7 +109,7 @@ Finally restart both the InvenTree web server and background worker. InvenTree d
 Copy the wheel to a persistent path that is visible inside the InvenTree server and worker environments. Add a PEP 508 file requirement to `plugins.txt`:
 
 ```text
-inventree-multi-site-importer @ file:///absolute/path/visible/to/inventree_multi_site_importer-0.1.12-py3-none-any.whl
+inventree-multi-site-importer @ file:///absolute/path/visible/to/inventree_multi_site_importer-0.1.19-py3-none-any.whl
 ```
 
 For Docker, the wheel must be placed in a bind-mounted or persistent data path and the path in `plugins.txt` must be the path **inside the container**, not the host-only path. Run `invoke plugins`, the normal update/migration process, and restart the server and worker.
@@ -228,7 +228,38 @@ Each row is classified as:
 
 The plan also resolves mapped category/subcategory chains against `PartCategory`, reports unmapped categories as warnings, validates every primary and gallery image URL, counts `parameter.*` mappings, and shows existing record IDs. A missing or ambiguous mapped category path is an error. Planning performs no database writes and does not download images. A plan is marked ready only when it contains no conflicts or errors.
 
-Map the captured `Image URL` field to **Primary Image URL** (`image_url`) and `Image URLs` to **Product Image Gallery** (`image_urls`). Gallery input may be a newline-delimited value or a JSON array. The mapper converts it to an ordered, deduplicated list, places the mapped primary image first, and promotes the first gallery image to primary when no separate primary mapping is configured. The normalized list is retained in previews and import plans for future part-image and attachment writes.
+Map the captured `Image URL` field to **Primary Image URL** (`image_url`) and `Image URLs` to **Product Image Gallery** (`image_urls`). Gallery input may be a newline-delimited value or a JSON array. The mapper converts it to an ordered, deduplicated list, places the mapped primary image first, and promotes the first gallery image to primary when no separate primary mapping is configured. The normalized list is retained in previews, plans, and detail imports.
+
+## Create new parts
+
+Use **Select dataset rows** first to include or exclude individual rows, the current 100-row page, or the entire capture. Selection is non-destructive: it does not change the stored capture. The selected original row indices are sent to mapping preview, planning, category creation, and part creation. Changing the selection invalidates the displayed plan and requires it to be rebuilt.
+
+After building a ready plan, select **Create New Parts** and confirm the displayed counts. The plugin rebuilds the selected subset against current database state, checks the signed-in user's native **Part: Add** role permission, and creates every selected row still classified as `create` in one atomic transaction. Rows classified as `update` are skipped, so retrying a successful dataset does not intentionally create duplicate identifiers. Any live conflict, mapping error, model-validation failure, or write failure prevents or rolls back the entire batch.
+
+This step sets the mapped part number as `IPN`, maps name and description, assigns the uniquely resolved category, and marks the part active and purchaseable. Supplier parts, stock items, and stock transactions remain separate future steps.
+
+## Import notes, parameters, and images
+
+Once every selected row resolves to an existing part, select **Import Notes, Parameters & Images**. This confirmed stage:
+
+- replaces part notes only when the mapped `notes` value is non-empty;
+- creates or updates each mapped `parameter.*` value using an existing, uniquely named InvenTree parameter template applicable to parts;
+- downloads the first normalized image into the primary part image slot only when that slot is empty; and
+- downloads remaining gallery images as part attachments, skipping attachments previously imported with the same source URL.
+
+The **Matching parts** selector defaults to **Update**. Update mode applies mapped names and categories, applies description and notes only when non-empty, and preserves an existing primary image. **Overwrite mapped fields and primary image** also permits mapped description and notes to clear existing values and replaces the primary image when one is mapped. Both modes upsert mapped parameters and preserve unrelated parameters, user-created attachments, and fields which are not part of the mapping.
+
+Missing parameter templates block the database stage and are listed in the response. Create those templates in InvenTree, including any required units or choices, then retry. Notes and parameters are written atomically. Image storage is processed afterward because file storage is not database-transactional; individual download failures are reported without undoing valid notes and parameters.
+
+Remote image downloads allow only HTTP(S) hosts resolving exclusively to public network addresses, revalidate redirects, require an image content type and valid image data, and default to a 10 MiB per-image limit and 100 images per request. Configure these with **Maximum remote image size** and **Maximum images per detail import**. Use dataset selection to process larger imports in batches.
+
+The workspace batches detail imports automatically. It reads the active server image limit from the import plan, groups selected rows without exceeding that image limit or 100 rows per request, submits each batch sequentially, displays live batch progress, and combines the counts and image errors into one final result. A single row containing more images than the configured per-request limit must still be handled by raising the limit or reducing that row's mapped gallery.
+
+Before importing details, select **Validate & Prefetch Images**. The workspace submits mapped URLs in batches of 25. Each unique capture URL is downloaded and validated once, then stored in a capture-scoped prefetch manifest. The result lists the specific failure reason for every URL. Use **Retry Failed Images** for transient failures. If failures remain, **Exclude Failed & Proceed** requires explicit confirmation, marks only those failed URLs as excluded, and continues detail import with the cached successful files.
+
+Detail import refuses to proceed while the selected capture has unresolved failed prefetch entries. Ready files are read from the cache instead of downloaded again. Excluded URLs are counted and skipped. If the original primary URL is excluded, the next available normalized gallery image becomes the primary candidate. Cache entries and files expire lazily after seven days by default; configure this with **Image prefetch cache retention**.
+
+Version `0.1.19` canonicalizes the previously server-generated `0003_alter_captureimport_id_alter_mappingprofile_id` migration and places the image manifest in `0004_imageprefetch`. This keeps upgrades linear on installations where InvenTree had already generated the primary-key migration locally.
 
 If one or more mapped paths are missing, the workspace enables **Create Missing Categories**. Review the paths shown by the plan and confirm the prompt. The plugin creates only the absent hierarchy segments, reuses existing segments, and then rebuilds the read-only plan. A persistent result panel lists each created and reused category with its database ID and confirms whether every mapped path was resolved. The signed-in user must have InvenTree's native **Part Category: Add** role permission; the plugin checks this through InvenTree's role-aware permission system. This action does not create or update parts.
 
@@ -321,6 +352,11 @@ All routes require normal InvenTree authentication and are mounted under:
 | `POST` | `captures/{id}/preview/` | Preview rules or a stored mapping profile |
 | `POST` | `captures/{id}/plan/` | Build a read-only import plan against existing identifiers |
 | `POST` | `captures/{id}/categories/` | Explicitly create missing mapped category paths (`confirm: true` required) |
+| `POST` | `captures/{id}/parts/` | Revalidate a plan and atomically create new parts (`confirm: true` required) |
+| `POST` | `captures/{id}/details/` | Import notes, parameters, primary images, and gallery attachments (`confirm: true` required) |
+| `GET`, `POST` | `captures/{id}/images/prefetch/` | Inspect or batch-download the capture image prefetch manifest |
+| `POST` | `captures/{id}/images/exclude-failures/` | Explicitly exclude failed prefetched URLs (`confirm: true` required) |
+| `GET` | `captures/{id}/rows/` | Read a paged slice of immutable dataset rows for import selection |
 | `GET`, `POST` | `mapping-profiles/` | List or create mapping profiles |
 | `GET`, `PATCH`, `PUT`, `DELETE` | `mapping-profiles/{id}/` | Retrieve, edit, or delete one mapping profile |
 
