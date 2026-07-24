@@ -93,7 +93,11 @@ async function handleMessage(message) {
         message: "Preparing supplier capture…"
       });
       try {
-        const capture = await captureCurrentTabData(merged, message?.selectedChildLinks || []);
+        const capture = await captureCurrentTabData(
+          merged,
+          message?.selectedChildLinks || [],
+          message?.targetTabId
+        );
         await chrome.storage.local.set({ [LAST_CAPTURE_KEY]: capture });
         await setCaptureProgress({
           status: "complete",
@@ -115,8 +119,28 @@ async function handleMessage(message) {
       const incoming = sanitizeSettings(message?.settings || {});
       const persisted = await getSettings();
       const merged = { ...persisted, ...incoming };
-      const { links, itemLabels } = await previewLinkedPages(merged);
+      const { links, itemLabels } = await previewLinkedPages(merged, message?.targetTabId);
       return { ok: true, links, itemLabels };
+    }
+
+    case "importDataset": {
+      const capture = buildImportedDatasetCapture({
+        fileName: message?.fileName,
+        text: message?.text,
+        metadata: message?.metadata
+      });
+      await chrome.storage.local.set({ [LAST_CAPTURE_KEY]: capture });
+      await setCaptureProgress({
+        status: "complete",
+        completed: capture.rows.length,
+        total: capture.rows.length,
+        message: `Dataset imported: ${capture.rows.length} row(s).`
+      });
+      return {
+        ok: true,
+        capture,
+        warnings: capture.importWarnings || []
+      };
     }
 
     case "downloadExport": {
@@ -1488,8 +1512,196 @@ function normalizePath(value, defaultPath) {
   return path.startsWith("/") ? path : `/${path}`;
 }
 
-async function captureCurrentTabData(settings, selectedChildLinks) {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+function parseImportedCsv(text) {
+  const records = [];
+  let record = [];
+  let field = "";
+  let quoted = false;
+  const source = String(text || "").replace(/^\uFEFF/, "");
+
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (quoted) {
+      if (char === '"' && source[index + 1] === '"') {
+        field += '"';
+        index += 1;
+      } else if (char === '"') {
+        quoted = false;
+      } else {
+        field += char;
+      }
+      continue;
+    }
+    if (char === '"') {
+      quoted = true;
+    } else if (char === ",") {
+      record.push(field);
+      field = "";
+    } else if (char === "\n") {
+      record.push(field.replace(/\r$/, ""));
+      records.push(record);
+      record = [];
+      field = "";
+    } else {
+      field += char;
+    }
+  }
+  if (quoted) throw new Error("CSV contains an unterminated quoted field.");
+  if (field || record.length) {
+    record.push(field.replace(/\r$/, ""));
+    records.push(record);
+  }
+  const nonEmpty = records.filter((row) => row.some((value) => String(value).trim()));
+  if (nonEmpty.length < 2) throw new Error("CSV must contain a header row and at least one data row.");
+
+  const headers = nonEmpty[0].map((value, index) => String(value || "").trim() || `Column ${index + 1}`);
+  if (new Set(headers).size !== headers.length) {
+    throw new Error("CSV header names must be unique.");
+  }
+  const rows = nonEmpty.slice(1).map((values) => {
+    const row = {};
+    headers.forEach((header, index) => {
+      row[header] = values[index] ?? "";
+    });
+    return row;
+  });
+  return { headers, rows };
+}
+
+function importedFieldKey(row, expected) {
+  const wanted = String(expected || "").trim().toLowerCase();
+  return Object.keys(row || {}).find((key) => String(key).trim().toLowerCase() === wanted) || "";
+}
+
+function applyImportedFallback(row, field, value) {
+  const fallback = String(value || "").trim();
+  if (!fallback) return;
+  const existingKey = importedFieldKey(row, field);
+  if (!existingKey) {
+    row[field] = fallback;
+  } else if (!String(row[existingKey] ?? "").trim()) {
+    row[existingKey] = fallback;
+  }
+}
+
+function buildImportedDatasetCapture({ fileName, text, metadata }) {
+  const safeName = String(fileName || "imported-dataset").trim().slice(0, 240);
+  const contents = String(text || "");
+  if (!contents.trim()) throw new Error("The selected dataset file is empty.");
+  if (contents.length > 25 * 1024 * 1024) {
+    throw new Error("Dataset files are limited to 25 MB.");
+  }
+
+  let input = {};
+  let headers = [];
+  let rows = [];
+  const looksJson = /\.json$/i.test(safeName) || /^[\s\uFEFF]*[\[{]/.test(contents);
+  if (looksJson) {
+    try {
+      input = JSON.parse(contents.replace(/^\uFEFF/, ""));
+    } catch (error) {
+      throw new Error(`Invalid JSON dataset: ${String(error?.message || error)}`);
+    }
+    const rawCapture = input?.payload?.rows ? input.payload : input;
+    if (Array.isArray(rawCapture)) {
+      rows = rawCapture;
+      input = {};
+    } else {
+      rows = rawCapture?.rows;
+      headers = Array.isArray(rawCapture?.headers) ? rawCapture.headers : [];
+      input = rawCapture || {};
+    }
+  } else {
+    const parsed = parseImportedCsv(contents);
+    headers = parsed.headers;
+    rows = parsed.rows;
+  }
+
+  if (!Array.isArray(rows) || rows.length === 0) {
+    throw new Error("Dataset must contain at least one row.");
+  }
+  if (rows.length > 5000) {
+    throw new Error("Dataset exceeds the extension import limit of 5,000 rows.");
+  }
+  if (!rows.every((row) => row && typeof row === "object" && !Array.isArray(row))) {
+    throw new Error("Every imported dataset row must be an object.");
+  }
+
+  const options = metadata && typeof metadata === "object" ? metadata : {};
+  const category = String(options.category || "").trim();
+  const subcategory = String(options.subcategory || "").trim();
+  const normalizedRows = rows.map((row) => {
+    const normalized = { ...row };
+    applyImportedFallback(normalized, "Category", category);
+    applyImportedFallback(normalized, "Subcategory", subcategory);
+    return normalized;
+  });
+  const headerSet = new Set(headers.map((header) => String(header || "").trim()).filter(Boolean));
+  for (const row of normalizedRows) {
+    for (const key of Object.keys(row)) headerSet.add(String(key));
+  }
+
+  const enteredSource = String(options.source || "").trim().toLowerCase();
+  const source = (enteredSource || String(input.source || "imported-dataset").trim().toLowerCase())
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80) || "imported-dataset";
+  const enteredUrl = String(options.sourceUrl || "").trim();
+  const sourceUrl = enteredUrl || String(input.page_url || input.pageUrl || "").trim();
+  if (sourceUrl) {
+    let parsed;
+    try {
+      parsed = new URL(sourceUrl);
+    } catch {
+      throw new Error("Dataset source URL must be a valid HTTP or HTTPS URL.");
+    }
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      throw new Error("Dataset source URL must use HTTP or HTTPS.");
+    }
+  }
+
+  const warnings = [];
+  if (!sourceUrl) {
+    warnings.push("No source URL was supplied; provenance and URL-scoped mapping profiles will be limited.");
+  }
+  if (!category && !normalizedRows.some((row) => String(row[importedFieldKey(row, "Category")] || "").trim())) {
+    warnings.push("No category was supplied or found in the dataset.");
+  }
+
+  return {
+    source,
+    captureProfile: String(input.capture_profile || input.captureProfile || "dataset-import"),
+    pageType: String(input.page_type || input.pageType || "imported-table"),
+    capturedAt: new Date().toISOString(),
+    pageTitle: String(options.title || input.page_title || input.pageTitle || safeName.replace(/\.[^.]+$/, "")).trim(),
+    pageUrl: sourceUrl,
+    headers: Array.from(headerSet),
+    rows: normalizedRows,
+    pagesScraped: Number(input.pages_scraped || input.pagesScraped || 1),
+    linkedPagesFound: 0,
+    linkedPagesCrawled: 0,
+    importedFileName: safeName,
+    importWarnings: warnings
+  };
+}
+
+async function resolveCaptureTab(targetTabId) {
+  const requestedId = Number(targetTabId);
+  if (Number.isInteger(requestedId) && requestedId > 0) {
+    try {
+      const requested = await chrome.tabs.get(requestedId);
+      if (requested?.id && requested.url) return requested;
+    } catch {
+      // The selected tab may have closed between the popup request and capture.
+    }
+  }
+
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return activeTab || null;
+}
+
+async function captureCurrentTabData(settings, selectedChildLinks, targetTabId) {
+  const tab = await resolveCaptureTab(targetTabId);
   if (!tab?.id || !tab.url) {
     throw new Error("No active tab available.");
   }
@@ -1511,8 +1723,8 @@ async function captureCurrentTabData(settings, selectedChildLinks) {
   throw new Error("Unsupported page. Open a McMaster-Carr, Bolt Depot, or Amazon orders/order-detail page.");
 }
 
-async function previewLinkedPages(settings) {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+async function previewLinkedPages(settings, targetTabId) {
+  const tab = await resolveCaptureTab(targetTabId);
   if (!tab?.id || !tab.url) {
     throw new Error("No active tab available.");
   }
@@ -2226,90 +2438,194 @@ function scrapeAmazonProductPage() {
     return String(value || "").replace(/\s+/g, " ").trim();
   }
 
-  // ASIN
-  let asin = "";
-  const asinMatch = location.pathname.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i);
-  if (asinMatch) asin = asinMatch[1].toUpperCase();
+  function firstText(selectors) {
+    for (const selector of selectors) {
+      const value = normalizeText(document.querySelector(selector)?.textContent || "");
+      if (value) return value;
+    }
+    return "";
+  }
 
-  // Title
+  function absoluteHttpUrl(value) {
+    const raw = String(value || "").trim();
+    if (!raw || raw.startsWith("data:")) return "";
+    try {
+      const parsed = new URL(raw, location.href);
+      return /^https?:$/i.test(parsed.protocol) ? parsed.href : "";
+    } catch {
+      return "";
+    }
+  }
+
+  function addImage(value, output, seen) {
+    const url = absoluteHttpUrl(value);
+    if (
+      !url ||
+      seen.has(url) ||
+      /transparent-pixel|grey-pixel|sprite|loading/i.test(url)
+    ) return;
+    seen.add(url);
+    output.push(url);
+  }
+
+  function addSpec(target, rawKey, rawValue) {
+    const key = normalizeText(rawKey).replace(/[\s:]+$/, "");
+    const value = normalizeText(rawValue);
+    if (!key || !value || key.length > 120 || key === value) return;
+    if (!target[key]) target[key] = value;
+  }
+
+  function specValue(specs, labels) {
+    const entries = Object.entries(specs);
+    for (const label of labels) {
+      const wanted = label.toLowerCase();
+      const match = entries.find(
+        ([key]) => normalizeText(key).toLowerCase() === wanted
+      );
+      if (match) return match[1];
+    }
+    return "";
+  }
+
+  function parseJsonLd() {
+    const products = [];
+    for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+      try {
+        const parsed = JSON.parse(script.textContent || "null");
+        const pending = Array.isArray(parsed) ? [...parsed] : [parsed];
+        while (pending.length) {
+          const value = pending.shift();
+          if (!value || typeof value !== "object") continue;
+          if (Array.isArray(value)) {
+            pending.push(...value);
+            continue;
+          }
+          const type = Array.isArray(value["@type"]) ? value["@type"] : [value["@type"]];
+          if (type.some((item) => String(item).toLowerCase() === "product")) products.push(value);
+          if (Array.isArray(value["@graph"])) pending.push(...value["@graph"]);
+        }
+      } catch {
+        // Ignore malformed structured data and continue with the visible page.
+      }
+    }
+    return products[0] || {};
+  }
+
+  const structured = parseJsonLd();
+  const canonicalAsinMatch = (
+    location.pathname.match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i) ||
+    String(document.querySelector("input#ASIN")?.value || "").match(/([A-Z0-9]{10})/i) ||
+    String(structured.sku || "").match(/^([A-Z0-9]{10})$/i)
+  );
+  const asin = canonicalAsinMatch ? canonicalAsinMatch[1].toUpperCase() : "";
+
   const titleEl =
     document.getElementById("productTitle") ||
     document.querySelector("span#productTitle") ||
     document.querySelector("h1.a-size-large") ||
     document.querySelector("h1");
-  const title = normalizeText(titleEl?.textContent || document.title || "");
+  const title = normalizeText(
+    titleEl?.textContent ||
+    structured.name ||
+    document.querySelector('meta[property="og:title"]')?.content ||
+    document.title ||
+    ""
+  );
 
-  // Brand
   const brandEl =
     document.getElementById("bylineInfo") ||
     document.querySelector("#brand") ||
     document.querySelector("a#bylineInfo_feature_div a");
-  const brand = normalizeText(
+  const visibleBrand = normalizeText(
     (brandEl?.textContent || "")
       .replace(/^Visit the\s+/i, "")
       .replace(/\s+Store$/i, "")
   );
+  const structuredBrand = typeof structured.brand === "object"
+    ? structured.brand?.name
+    : structured.brand;
 
-  // Main image – prefer the highest-resolution entry in data-a-dynamic-image.
-  let imageUrl = "";
+  // Capture the complete product gallery, preferring original/high-resolution URLs.
+  const imageUrls = [];
+  const seenImages = new Set();
   const landingImg =
     document.getElementById("landingImage") ||
-    document.getElementById("imgBlkFront");
-  if (landingImg) {
-    const dynamicData = landingImg.getAttribute("data-a-dynamic-image");
+    document.getElementById("imgBlkFront") ||
+    document.querySelector("#main-image-container img");
+  const imageElements = [
+    ...(landingImg ? [landingImg] : []),
+    ...document.querySelectorAll(
+      "#altImages img, #imageBlock img, #main-image-container img, " +
+      "#aplus img, #aplus_feature_div img"
+    )
+  ];
+  for (const image of imageElements) {
+    const dynamicData = image.getAttribute("data-a-dynamic-image");
     if (dynamicData) {
       try {
         const imgMap = JSON.parse(dynamicData);
-        let bestUrl = "";
-        let bestArea = 0;
-        for (const [url, dims] of Object.entries(imgMap)) {
-          const area = Array.isArray(dims) ? (dims[0] || 0) * (dims[1] || 0) : 0;
-          if (area > bestArea) {
-            bestArea = area;
-            bestUrl = url;
-          }
-        }
-        imageUrl = bestUrl;
+        Object.entries(imgMap)
+          .sort((left, right) => {
+            const area = (entry) => Array.isArray(entry[1])
+              ? Number(entry[1][0] || 0) * Number(entry[1][1] || 0)
+              : 0;
+            return area(right) - area(left);
+          })
+          .forEach(([url]) => addImage(url, imageUrls, seenImages));
       } catch {
-        // fall through
+        // Continue with the normal image attributes.
       }
     }
-    if (!imageUrl) {
-      imageUrl =
-        landingImg.getAttribute("data-old-hires") ||
-        landingImg.getAttribute("src") ||
-        "";
-    }
+    addImage(image.getAttribute("data-old-hires"), imageUrls, seenImages);
+    addImage(image.getAttribute("data-a-hires"), imageUrls, seenImages);
+    addImage(image.currentSrc, imageUrls, seenImages);
+    addImage(image.getAttribute("src"), imageUrls, seenImages);
   }
+  const structuredImages = Array.isArray(structured.image) ? structured.image : [structured.image];
+  for (const image of structuredImages) {
+    addImage(typeof image === "object" ? image?.url : image, imageUrls, seenImages);
+  }
+  addImage(document.querySelector('meta[property="og:image"]')?.content, imageUrls, seenImages);
+  const imageUrl = imageUrls[0] || "";
 
-  // Price
   const priceEl =
     document.querySelector(".a-price .a-offscreen") ||
     document.querySelector(".apexPriceToPay .a-offscreen") ||
     document.querySelector("#priceblock_ourprice") ||
     document.querySelector("#priceblock_dealprice") ||
     document.querySelector(".a-price");
-  const price = normalizeText(priceEl?.textContent || "");
+  const offer = Array.isArray(structured.offers) ? structured.offers[0] : (structured.offers || {});
+  const price = normalizeText(
+    priceEl?.textContent ||
+    offer.price ||
+    document.querySelector('meta[property="product:price:amount"]')?.content ||
+    ""
+  );
+  const priceCurrency = normalizeText(
+    offer.priceCurrency ||
+    document.querySelector('meta[property="product:price:currency"]')?.content ||
+    ""
+  );
 
-  // Technical specs table (new and old Amazon layouts).
   const specsObj = {};
-
   const specRows = Array.from(
     document.querySelectorAll(
       "#productDetails_techSpec_section_1 tr, " +
+        "#productDetails_techSpec_section_2 tr, " +
         "#productDetails_detailBullets_sections1 tr, " +
         "#productDetails_db_sections tr, " +
+        "#prodDetails tr, " +
         "#tech-specs-table tr, " +
-        ".product-specs-table tr"
+        ".product-specs-table tr, " +
+        "[id^='productDetails'] tr"
     )
   );
   for (const row of specRows) {
     const th = normalizeText(row.querySelector("th")?.textContent || "");
     const td = normalizeText(row.querySelector("td")?.textContent || "");
-    if (th && td) specsObj[th] = td;
+    addSpec(specsObj, th, td);
   }
 
-  // Detail-bullets list (older Amazon layout).
   const bulletItems = Array.from(
     document.querySelectorAll(
       "#detailBullets_feature_div .a-list-item, " +
@@ -2320,82 +2636,135 @@ function scrapeAmazonProductPage() {
   for (const item of bulletItems) {
     const spans = item.querySelectorAll("span");
     if (spans.length >= 2) {
-      const key = normalizeText(spans[0].textContent).replace(/:$/, "").trim();
-      const value = normalizeText(spans[1].textContent).trim();
-      if (key && value && key.length < 80) specsObj[key] = value;
+      addSpec(specsObj, spans[0].textContent, spans[spans.length - 1].textContent);
     } else {
       const text = normalizeText(item.textContent);
       const colonIdx = text.indexOf(":");
       if (colonIdx > 0 && colonIdx < 80) {
-        const key = text.slice(0, colonIdx).trim();
-        const value = text.slice(colonIdx + 1).trim();
-        if (key && value) specsObj[key] = value;
+        addSpec(specsObj, text.slice(0, colonIdx), text.slice(colonIdx + 1));
       }
     }
   }
 
-  // Feature bullets (description).
   const featureBullets = Array.from(
     document.querySelectorAll(
       "#feature-bullets ul li span.a-list-item, " +
-        "#feature-bullets .a-unordered-list li span"
+        "#feature-bullets .a-unordered-list li span, " +
+        "#featurebullets_feature_div li span.a-list-item"
     )
   )
     .map((el) => normalizeText(el.textContent))
-    .filter((text) => text && text.length > 10)
-    .slice(0, 5);
+    .filter((text, index, values) => text && text.length > 10 && values.indexOf(text) === index)
+    .slice(0, 10);
 
   const description =
-    featureBullets.join("; ") ||
     normalizeText(
       document.querySelector("#productDescription p, #productDescription")?.textContent || ""
-    );
+    ) ||
+    normalizeText(structured.description || "") ||
+    featureBullets.join("; ");
 
-  // Model number (common Amazon spec labels).
-  const modelNumber =
-    specsObj["Item model number"] ||
-    specsObj["Model Number"] ||
-    specsObj["Model"] ||
-    specsObj["Part Number"] ||
-    "";
+  const aboutItem = featureBullets.join("\n");
+  const modelNumber = specValue(specsObj, [
+    "Item model number", "Model Number", "Model", "Part Number"
+  ]) || normalizeText(structured.model || "");
+  const manufacturerPartNumber = specValue(specsObj, [
+    "Part Number", "Manufacturer Part Number", "Manufacturer reference"
+  ]) || normalizeText(structured.mpn || modelNumber);
+  const manufacturer = specValue(specsObj, ["Manufacturer"]) || normalizeText(
+    typeof structured.manufacturer === "object"
+      ? structured.manufacturer?.name
+      : structured.manufacturer
+  );
+  const brand = visibleBrand || normalizeText(structuredBrand || manufacturer);
+  const upc = specValue(specsObj, ["UPC"]) || normalizeText(structured.gtin12 || "");
+  const ean = specValue(specsObj, ["EAN"]) || normalizeText(structured.gtin13 || "");
 
-  // Category breadcrumbs.
   const breadcrumbs = Array.from(
     document.querySelectorAll(
       "#wayfinding-breadcrumbs_feature_div a, .a-breadcrumb a"
     )
   )
     .map((el) => normalizeText(el.textContent))
-    .filter(Boolean);
+    .filter((text, index, values) => text && values.indexOf(text) === index);
   const category = breadcrumbs.join(" > ");
 
+  const selectedVariations = [];
+  for (const container of document.querySelectorAll(
+    "#twister .a-row, #twister_feature_div .a-row, [id^='variation_']"
+  )) {
+    const label = normalizeText(
+      container.querySelector(".a-form-label, label")?.textContent || ""
+    ).replace(/:\s*$/, "");
+    const value = normalizeText(
+      container.querySelector(".selection, .a-dropdown-prompt, .swatchSelect")?.textContent ||
+      container.querySelector("[aria-checked='true']")?.getAttribute("title") ||
+      container.querySelector(".selected")?.getAttribute("title") ||
+      ""
+    ).replace(/^Click to select\s*/i, "");
+    if (label && value) selectedVariations.push(`${label}: ${value}`);
+  }
+
+  const availability = firstText([
+    "#availability span", "#outOfStock", "#availabilityInsideBuyBox_feature_div"
+  ]) || normalizeText(offer.availability || "").replace(/^https?:\/\/schema\.org\//i, "");
+  const seller = firstText([
+    "#sellerProfileTriggerId", "#merchant-info a", "#merchantInfoFeature_feature_div a"
+  ]) || normalizeText(typeof offer.seller === "object" ? offer.seller?.name : offer.seller);
+  const shipsFrom = firstText([
+    "#fulfillerInfoFeature_feature_div .offer-display-feature-text-message",
+    "#tabular-buybox-truncate-0 .tabular-buybox-text"
+  ]);
+  const condition = firstText([
+    "#newAccordionRow .header-price", "#usedAccordionRow .header-price", "#condition"
+  ]) || normalizeText(offer.itemCondition || "").replace(/^https?:\/\/schema\.org\//i, "");
+  const canonicalUrl = asin ? `${location.origin}/dp/${asin}` : (
+    document.querySelector('link[rel="canonical"]')?.href || location.href
+  );
+
+  const specLines = Object.entries(specsObj).map(([key, value]) => `${key}: ${value}`);
   const row = {
+    ...specsObj,
     "Product Name": title,
     "Brand": brand,
+    "Manufacturer": manufacturer,
     "ASIN": asin,
+    "Supplier SKU": asin,
     "Model Number": modelNumber,
+    "Manufacturer Part Number": manufacturerPartNumber,
+    "UPC": upc,
+    "EAN": ean,
     "Category": category,
     "Description": description,
+    "About This Item": aboutItem,
+    "Selected Variations": selectedVariations.join("\n"),
     "Price": price,
-    "Product URL": location.href,
+    "Price Currency": priceCurrency,
+    "Availability": availability,
+    "Condition": condition,
+    "Sold By": seller,
+    "Ships From": shipsFrom,
+    "Product URL": canonicalUrl,
+    "Source Page URL": location.href,
     "Image URL": imageUrl,
-    ...specsObj
+    "Image URLs": imageUrls.join("\n"),
+    "Image Count": imageUrls.length,
+    "Product Detail Specs": specLines.join("\n")
   };
 
-  const headers = Object.keys(row);
-
   return {
-    ok: Boolean(title),
+    ok: Boolean(title && (asin || modelNumber || imageUrl)),
     title,
     pageTitle: title,
     pageBreadcrumbs: category,
     asin,
-    headers,
+    headers: Object.keys(row),
     row,
     imageUrl,
-    productUrl: location.href,
+    imageUrls,
+    productUrl: canonicalUrl,
     error: title
-      ? undefined
+      ? "Product title was found, but no ASIN, model number, or product image could be extracted."
       : "Could not extract product title from this Amazon product page."
   };
 }

@@ -100,6 +100,92 @@ test("saves only the plugin connection and capture settings", async () => {
   await page.close();
 });
 
+test("imports an independently collected JSON dataset with provenance and category fallbacks", async () => {
+  const page = await openPopup();
+  await page.locator("#datasetImportPanel").evaluate((node) => { node.open = true; });
+  await page.locator("#datasetFile").setInputFiles({
+    name: "supplier-catalog.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({
+      contract_version: "1.0",
+      source: "embedded-source",
+      payload: {
+        contract_version: "1.0",
+        capture_profile: "catalog-research",
+        source: "embedded-source",
+        page_type: "product-variation-table",
+        page_title: "Embedded title",
+        page_url: "https://embedded.example/catalog",
+        headers: ["Part Number", "Product Name", "Category", "Image URLs"],
+        rows: [
+          {
+            "Part Number": "INS-1",
+            "Product Name": "Insert One",
+            "Category": "",
+            "Image URLs": "https://images.example/front.jpg\nhttps://images.example/side.jpg"
+          },
+          {
+            "Part Number": "INS-2",
+            "Product Name": "Insert Two",
+            "Category": "Existing Category"
+          }
+        ]
+      }
+    }))
+  });
+  await page.fill("#datasetSource", "Ruthex Research");
+  await page.fill("#datasetSourceUrl", "https://www.ruthex.de/collections/gewindeeinsatze");
+  await page.fill("#datasetTitle", "Ruthex insert catalog");
+  await page.fill("#datasetCategory", "Fasteners");
+  await page.fill("#datasetSubcategory", "Threaded Inserts");
+  await page.click("#importDatasetBtn");
+  await expect(page.locator("#status")).toContainText("Loaded 2 dataset row(s)");
+
+  const capture = await page.evaluate(() =>
+    chrome.storage.local.get("lastCapture").then((data) => data.lastCapture)
+  );
+  expect(capture.source).toBe("ruthex-research");
+  expect(capture.captureProfile).toBe("catalog-research");
+  expect(capture.pageType).toBe("product-variation-table");
+  expect(capture.pageTitle).toBe("Ruthex insert catalog");
+  expect(capture.pageUrl).toBe("https://www.ruthex.de/collections/gewindeeinsatze");
+  expect(capture.rows[0].Category).toBe("Fasteners");
+  expect(capture.rows[0].Subcategory).toBe("Threaded Inserts");
+  expect(capture.rows[1].Category).toBe("Existing Category");
+  expect(capture.headers).toContain("Subcategory");
+  await page.close();
+});
+
+test("imports quoted multiline CSV and warns when provenance URL is omitted", async () => {
+  const page = await openPopup();
+  await page.locator("#datasetImportPanel").evaluate((node) => { node.open = true; });
+  await page.locator("#datasetFile").setInputFiles({
+    name: "inserts.csv",
+    mimeType: "text/csv",
+    buffer: Buffer.from(
+      '\uFEFFPart Number,Product Name,Description,Image URLs\r\n' +
+      'CSV-1,"Insert, Brass","Line one\r\nLine two","https://images.example/front.jpg\r\nhttps://images.example/side.jpg"\r\n'
+    )
+  });
+  await page.fill("#datasetSource", "offline-measurements");
+  await page.fill("#datasetCategory", "Fasteners");
+  await page.click("#importDatasetBtn");
+  await expect(page.locator("#status")).toContainText("Loaded 1 dataset row(s)");
+  await expect(page.locator("#status")).toContainText("No source URL was supplied");
+
+  const capture = await page.evaluate(() =>
+    chrome.storage.local.get("lastCapture").then((data) => data.lastCapture)
+  );
+  expect(capture.source).toBe("offline-measurements");
+  expect(capture.captureProfile).toBe("dataset-import");
+  expect(capture.pageType).toBe("imported-table");
+  expect(capture.rows[0]["Product Name"]).toBe("Insert, Brass");
+  expect(capture.rows[0].Description).toBe("Line one\r\nLine two");
+  expect(capture.rows[0]["Image URLs"]).toContain("side.jpg");
+  expect(capture.rows[0].Category).toBe("Fasteners");
+  await page.close();
+});
+
 test("submits a versioned raw capture to the plugin queue", async () => {
   submissions = [];
   const page = await openPopup();
@@ -150,6 +236,131 @@ test("reports unsupported pages during capture", async () => {
   await page.click("#captureBtn");
   await expect(page.locator("#status")).toContainText("Unsupported page");
   await page.close();
+});
+
+test("captures inventory fields and the image gallery from an Amazon product page", async () => {
+  await context.route("https://www.amazon.com/**", (route) => route.fulfill({
+    contentType: "text/html",
+    body: `
+      <html><head>
+        <title>Example Cordless Tool</title>
+        <link rel="canonical" href="https://www.amazon.com/dp/B0FJLZ9L9P">
+        <script type="application/ld+json">
+          {
+            "@type": "Product",
+            "name": "Example Cordless Tool",
+            "sku": "B0FJLZ9L9P",
+            "mpn": "TOOL-20V",
+            "brand": {"@type": "Brand", "name": "Example Tools"},
+            "manufacturer": {"@type": "Organization", "name": "Example Manufacturing"},
+            "gtin12": "012345678905",
+            "description": "A compact cordless tool.",
+            "image": ["https://images.example.test/tool-main.jpg"],
+            "offers": {
+              "@type": "Offer",
+              "price": "79.99",
+              "priceCurrency": "USD",
+              "availability": "https://schema.org/InStock",
+              "seller": {"@type": "Organization", "name": "Example Seller"}
+            }
+          }
+        </script>
+      </head><body>
+        <nav id="wayfinding-breadcrumbs_feature_div">
+          <a>Tools &amp; Home Improvement</a><a>Power Tools</a>
+        </nav>
+        <h1><span id="productTitle">Example Cordless Tool Kit</span></h1>
+        <a id="bylineInfo">Visit the Example Tools Store</a>
+        <div id="variation_size_name" class="a-row">
+          <span class="a-form-label">Size:</span><span class="selection">20V Kit</span>
+        </div>
+        <div id="feature-bullets"><ul>
+          <li><span class="a-list-item">Brushless motor for efficient operation and long service life.</span></li>
+          <li><span class="a-list-item">Includes battery, charger, belt hook, and carrying case.</span></li>
+        </ul></div>
+        <div id="productDescription"><p>Product-page description.</p></div>
+        <div id="availability"><span>In Stock</span></div>
+        <a id="sellerProfileTriggerId">Example Seller</a>
+        <div id="fulfillerInfoFeature_feature_div">
+          <span class="offer-display-feature-text-message">Amazon.com</span>
+        </div>
+        <span class="a-price"><span class="a-offscreen">$79.99</span></span>
+        <div id="main-image-container">
+          <img id="landingImage"
+            data-old-hires="https://images.example.test/tool-main.jpg"
+            data-a-dynamic-image='{"https://images.example.test/tool-main-large.jpg":[1600,1600]}'
+            src="https://images.example.test/tool-main-small.jpg">
+        </div>
+        <div id="altImages">
+          <img data-old-hires="https://images.example.test/tool-side.jpg"
+            src="https://images.example.test/tool-side-thumb.jpg">
+        </div>
+        <table id="productDetails_techSpec_section_1">
+          <tr><th>Part Number</th><td>TOOL-20V</td></tr>
+          <tr><th>Item model number</th><td>XT-200</td></tr>
+          <tr><th>Manufacturer</th><td>Example Manufacturing</td></tr>
+          <tr><th>Item Weight</th><td>4.2 pounds</td></tr>
+          <tr><th>Product Dimensions</th><td>12 x 8 x 4 inches</td></tr>
+        </table>
+      </body></html>`
+  }));
+
+  const popup = await openPopup();
+  await popup.selectOption("#sourceMode", "auto");
+  await popup.selectOption("#captureProfile", "single-item");
+  const supplier = await context.newPage();
+  await supplier.goto("https://www.amazon.com/dp/B0FJLZ9L9P?ref=order&th=1");
+  await supplier.bringToFront();
+  await popup.evaluate(() => document.querySelector("#captureBtn").click());
+  await expect(popup.locator("#status")).toContainText("Captured 1 row(s)");
+
+  const capture = await popup.evaluate(() =>
+    chrome.storage.local.get("lastCapture").then((data) => data.lastCapture)
+  );
+  expect(capture.source).toBe("amazon");
+  expect(capture.pageType).toBe("product-detail");
+  expect(capture.rows).toHaveLength(1);
+  expect(capture.rows[0]["Product Name"]).toBe("Example Cordless Tool Kit");
+  expect(capture.rows[0].ASIN).toBe("B0FJLZ9L9P");
+  expect(capture.rows[0]["Supplier SKU"]).toBe("B0FJLZ9L9P");
+  expect(capture.rows[0]["Manufacturer Part Number"]).toBe("TOOL-20V");
+  expect(capture.rows[0]["Model Number"]).toBe("XT-200");
+  expect(capture.rows[0].UPC).toBe("012345678905");
+  expect(capture.rows[0].Category).toBe("Tools & Home Improvement > Power Tools");
+  expect(capture.rows[0]["Selected Variations"]).toBe("Size: 20V Kit");
+  expect(capture.rows[0].Availability).toBe("In Stock");
+  expect(capture.rows[0]["Sold By"]).toBe("Example Seller");
+  expect(capture.rows[0]["Ships From"]).toBe("Amazon.com");
+  expect(capture.rows[0]["About This Item"]).toContain("Brushless motor");
+  expect(capture.rows[0]["Product Detail Specs"]).toContain("Item Weight: 4.2 pounds");
+  expect(capture.rows[0]["Product URL"]).toBe("https://www.amazon.com/dp/B0FJLZ9L9P");
+  expect(capture.rows[0]["Image URL"]).toBe("https://images.example.test/tool-main-large.jpg");
+  expect(capture.rows[0]["Image URLs"]).toContain("https://images.example.test/tool-side.jpg");
+  expect(capture.rows[0]["Image Count"]).toBeGreaterThanOrEqual(2);
+
+  const amazonTabId = await popup.evaluate(() =>
+    chrome.tabs.query({}).then((tabs) =>
+      tabs.find((tab) => tab.url?.includes("/dp/B0FJLZ9L9P"))?.id
+    )
+  );
+  const decoy = await context.newPage();
+  await decoy.goto("https://example.com/");
+  await decoy.bringToFront();
+  const targetedResponse = await popup.evaluate((targetTabId) =>
+    chrome.runtime.sendMessage({
+      type: "capturePage",
+      settings: { sourceMode: "auto", captureProfile: "single-item" },
+      targetTabId
+    }), amazonTabId
+  );
+  expect(targetedResponse.ok).toBe(true);
+  expect(targetedResponse.capture.source).toBe("amazon");
+  expect(targetedResponse.capture.rows[0].ASIN).toBe("B0FJLZ9L9P");
+
+  await decoy.close();
+  await supplier.close();
+  await popup.close();
+  await context.unroute("https://www.amazon.com/**");
 });
 
 test("enriches McMaster table rows from item pages while preserving list taxonomy", async () => {

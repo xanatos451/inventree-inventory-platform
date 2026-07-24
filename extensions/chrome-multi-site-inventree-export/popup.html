@@ -80,6 +80,33 @@
       </div>
     </details>
 
+    <details id="datasetImportPanel">
+      <summary>Import a JSON or CSV dataset</summary>
+      <div class="details-body">
+        <div class="meta">Load independently collected rows into the same preview, queue, and mapping workflow. Files remain local until you submit the resulting capture.</div>
+        <label for="datasetFile">Dataset file</label>
+        <input id="datasetFile" type="file" accept=".json,.csv,application/json,text/csv" />
+        <label for="datasetSource">Source identifier</label>
+        <input id="datasetSource" placeholder="e.g. ruthex or supplier-catalog" />
+        <label for="datasetSourceUrl">Source URL <span class="meta">(recommended)</span></label>
+        <input id="datasetSourceUrl" type="url" placeholder="https://supplier.example/catalog" />
+        <label for="datasetTitle">Dataset title <span class="meta">(optional)</span></label>
+        <input id="datasetTitle" placeholder="Defaults to file or embedded capture title" />
+        <div class="grid">
+          <div>
+            <label for="datasetCategory">Fallback category</label>
+            <input id="datasetCategory" placeholder="Fasteners" />
+          </div>
+          <div>
+            <label for="datasetSubcategory">Fallback subcategory</label>
+            <input id="datasetSubcategory" placeholder="Threaded Inserts" />
+          </div>
+        </div>
+        <div class="meta">Category fallbacks fill only missing or blank row values; existing dataset categories are preserved.</div>
+        <button id="importDatasetBtn" class="secondary">Load Dataset for Preview</button>
+      </div>
+    </details>
+
     <details id="settingsPanel">
       <summary>InvenTree plugin connection</summary>
       <div class="details-body">

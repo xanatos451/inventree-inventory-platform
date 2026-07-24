@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import json
 from urllib.parse import urlparse
 
 
@@ -31,6 +32,33 @@ def _valid_http_url(value):
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
+def _image_urls(value):
+    if isinstance(value, (list, tuple, set)):
+        candidates = list(value)
+    else:
+        text = _text(value)
+        candidates = []
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    candidates = parsed
+            except (TypeError, ValueError, json.JSONDecodeError):
+                candidates = []
+        if not candidates and text:
+            candidates = text.splitlines()
+
+    output = []
+    seen = set()
+    for candidate in candidates:
+        url = _text(candidate)
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        output.append(url)
+    return output
+
+
 def build_import_plan(items, part_lookup=None, supplier_lookup=None, category_lookup=None):
     """Classify mapped rows without writing to InvenTree."""
     items = list(items or [])
@@ -47,6 +75,13 @@ def build_import_plan(items, part_lookup=None, supplier_lookup=None, category_lo
         category = _text(item.get("category"))
         subcategory = _text(item.get("subcategory"))
         image_url = _text(item.get("image_url"))
+        image_urls = _image_urls(item.get("image_urls"))
+        if image_url:
+            image_urls = [image_url, *[url for url in image_urls if url != image_url]]
+        elif image_urls:
+            image_url = image_urls[0]
+            item["image_url"] = image_url
+        item["image_urls"] = image_urls
         errors = []
         warnings = []
         existing_parts = []
@@ -73,6 +108,13 @@ def build_import_plan(items, part_lookup=None, supplier_lookup=None, category_lo
                 errors.append("Mapped category path is ambiguous in InvenTree.")
         if image_url and not _valid_http_url(image_url):
             errors.append("Primary image URL must use HTTP or HTTPS.")
+        for image_index, gallery_url in enumerate(image_urls, start=1):
+            if gallery_url == image_url:
+                continue
+            if not _valid_http_url(gallery_url):
+                errors.append(
+                    f"Product image URL #{image_index} must use HTTP or HTTPS."
+                )
 
         if part_number:
             existing_parts = list(part_lookup(part_number) or [])
@@ -107,6 +149,9 @@ def build_import_plan(items, part_lookup=None, supplier_lookup=None, category_lo
             "name": name,
             "category": category,
             "subcategory": subcategory,
+            "image_url": image_url,
+            "image_urls": image_urls,
+            "image_count": len(image_urls),
             "parameter_count": len(_parameters(item)),
             "parameters": _parameters(item),
             "existing_parts": existing_parts,

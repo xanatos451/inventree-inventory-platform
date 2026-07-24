@@ -2,7 +2,7 @@
 
 Server-side companion to the [Multi-Site Inventory Capture Chrome extension](../../extensions/chrome-multi-site-inventree-export/README.md). The extension reads supplier pages; this plugin stores raw captures, exposes field-inspection and mapping tools, and provides the boundary for future inventory writes.
 
-> Current scope: version `0.1.11` queues captures, provides a visual mapping-profile editor with multi-field templates and image thumbnails, builds read-only import plans against existing InvenTree identifiers, and can explicitly create missing mapped category hierarchies. It deliberately does **not yet create or update InvenTree parts**.
+> Current scope: version `0.1.12` queues captures, provides a visual mapping-profile editor with multi-field templates and image galleries, builds read-only import plans against existing InvenTree identifiers, and can explicitly create missing mapped category hierarchies. It deliberately does **not yet create or update InvenTree parts**.
 
 ## Requirements
 
@@ -54,7 +54,7 @@ Omit `--clean` to retain existing artifacts. The script only permits output belo
 The distributable artifact is created under the consolidated repository output directory:
 
 ```text
-.artifacts/plugin/inventree_multi_site_importer-0.1.11-py3-none-any.whl
+.artifacts/plugin/inventree_multi_site_importer-0.1.12-py3-none-any.whl
 ```
 
 Before distributing it, run:
@@ -109,7 +109,7 @@ Finally restart both the InvenTree web server and background worker. InvenTree d
 Copy the wheel to a persistent path that is visible inside the InvenTree server and worker environments. Add a PEP 508 file requirement to `plugins.txt`:
 
 ```text
-inventree-multi-site-importer @ file:///absolute/path/visible/to/inventree_multi_site_importer-0.1.11-py3-none-any.whl
+inventree-multi-site-importer @ file:///absolute/path/visible/to/inventree_multi_site_importer-0.1.12-py3-none-any.whl
 ```
 
 For Docker, the wheel must be placed in a bind-mounted or persistent data path and the path in `plugins.txt` must be the path **inside the container**, not the host-only path. Run `invoke plugins`, the normal update/migration process, and restart the server and worker.
@@ -202,7 +202,7 @@ The workspace includes a visual mapping-profile editor and the detailed source-f
 To create a profile visually:
 
 1. Enter a profile name and confirm its source, capture-profile, and page-type scope.
-2. Map standard targets such as part number, name, category, variant, notes, and image URL. Choose **Template** to combine fields, for example `{ProductDetailPageTitle} — {ProductDetailVariant}`.
+2. Map standard targets such as part number, name, category, variant, notes, primary image URL, and product image gallery. Choose **Template** to combine fields, for example `{ProductDetailPageTitle} — {ProductDetailVariant}`.
 3. Select **Add Parameter Mapping** for each desired InvenTree parameter. Enter the future parameter name and select its captured source field.
 4. Use the sample-result column to confirm the first-row value and add a regex only when extraction is needed.
 5. Select **Preview Mapping** and review up to 20 transformed rows.
@@ -226,7 +226,9 @@ Each row is classified as:
 - `conflict` — the capture repeats a part number or the identifier matches multiple existing records.
 - `error` — required mapped data is missing or invalid.
 
-The plan also resolves mapped category/subcategory chains against `PartCategory`, reports unmapped categories as warnings, validates primary-image URL schemes, counts `parameter.*` mappings, and shows existing record IDs. A missing or ambiguous mapped category path is an error. Planning performs no database writes and does not download images. A plan is marked ready only when it contains no conflicts or errors.
+The plan also resolves mapped category/subcategory chains against `PartCategory`, reports unmapped categories as warnings, validates every primary and gallery image URL, counts `parameter.*` mappings, and shows existing record IDs. A missing or ambiguous mapped category path is an error. Planning performs no database writes and does not download images. A plan is marked ready only when it contains no conflicts or errors.
+
+Map the captured `Image URL` field to **Primary Image URL** (`image_url`) and `Image URLs` to **Product Image Gallery** (`image_urls`). Gallery input may be a newline-delimited value or a JSON array. The mapper converts it to an ordered, deduplicated list, places the mapped primary image first, and promotes the first gallery image to primary when no separate primary mapping is configured. The normalized list is retained in previews and import plans for future part-image and attachment writes.
 
 If one or more mapped paths are missing, the workspace enables **Create Missing Categories**. Review the paths shown by the plan and confirm the prompt. The plugin creates only the absent hierarchy segments, reuses existing segments, and then rebuilds the read-only plan. A persistent result panel lists each created and reused category with its database ID and confirms whether every mapped path was resolved. The signed-in user must have InvenTree's native **Part Category: Add** role permission; the plugin checks this through InvenTree's role-aware permission system. This action does not create or update parts.
 

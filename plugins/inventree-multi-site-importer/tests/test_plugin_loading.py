@@ -37,7 +37,7 @@ class PluginLoadingTests(unittest.TestCase):
             core = importlib.import_module(f"{package_name}.core")
             patterns = core.MultiSiteImporterPlugin().setup_urls()
 
-        self.assertEqual(package.PLUGIN_VERSION, "0.1.11")
+        self.assertEqual(package.PLUGIN_VERSION, "0.1.12")
         self.assertEqual(patterns[0][1][0], f"{package_name}.urls")
         self.assertNotIn(f"{package_name}.urls", sys.modules)
         self.assertNotIn(f"{package_name}.models", sys.modules)

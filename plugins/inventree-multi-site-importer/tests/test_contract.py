@@ -79,6 +79,36 @@ class CaptureContractTests(unittest.TestCase):
         self.assertEqual(mapped["parameter.Thread Size"], "M3")
         self.assertEqual(mapped["parameter.Length"], "4 mm")
 
+    def test_mapping_profile_normalizes_product_image_gallery(self):
+        mapped = map_row(
+            {
+                "Image URL": "https://images.example.test/primary.jpg",
+                "Image URLs": (
+                    "https://images.example.test/side.jpg\n"
+                    "https://images.example.test/primary.jpg\n"
+                    "https://images.example.test/package.jpg"
+                ),
+            },
+            {
+                "image_url": {"source_field": "Image URL", "regex": ""},
+                "image_urls": {"source_field": "Image URLs", "regex": ""},
+            },
+        )
+        self.assertEqual(mapped["image_url"], "https://images.example.test/primary.jpg")
+        self.assertEqual(mapped["image_urls"], [
+            "https://images.example.test/primary.jpg",
+            "https://images.example.test/side.jpg",
+            "https://images.example.test/package.jpg",
+        ])
+
+    def test_mapping_profile_promotes_first_gallery_image_to_primary(self):
+        mapped = map_row(
+            {"Image URLs": '["https://images.example.test/front.jpg", "https://images.example.test/back.jpg"]'},
+            {"image_urls": {"source_field": "Image URLs", "regex": ""}},
+        )
+        self.assertEqual(mapped["image_url"], "https://images.example.test/front.jpg")
+        self.assertEqual(len(mapped["image_urls"]), 2)
+
     def test_mapping_profile_combines_multiple_source_fields(self):
         mapped = map_row(
             {
@@ -127,6 +157,40 @@ class CaptureContractTests(unittest.TestCase):
         ])
         self.assertEqual(plan["summary"]["conflict"], 2)
         self.assertTrue(all(row["errors"] for row in plan["rows"]))
+
+    def test_import_plan_preserves_and_validates_product_image_gallery(self):
+        plan = build_import_plan([{
+            "part_number": "IMG-1",
+            "name": "Part With Gallery",
+            "category": "Fastening",
+            "image_urls": [
+                "https://images.example.test/front.jpg",
+                "https://images.example.test/front.jpg",
+                "https://images.example.test/side.jpg",
+            ],
+        }])
+        row = plan["rows"][0]
+        self.assertEqual(row["image_url"], "https://images.example.test/front.jpg")
+        self.assertEqual(row["image_count"], 2)
+        self.assertEqual(row["image_urls"], [
+            "https://images.example.test/front.jpg",
+            "https://images.example.test/side.jpg",
+        ])
+        self.assertEqual(row["mapped"]["image_urls"], row["image_urls"])
+        self.assertEqual(row["action"], "create")
+
+        invalid = build_import_plan([{
+            "part_number": "IMG-2",
+            "name": "Part With Unsafe Gallery",
+            "category": "Fastening",
+            "image_url": "https://images.example.test/front.jpg",
+            "image_urls": "https://images.example.test/front.jpg\nfile:///unsafe.png",
+        }])
+        self.assertEqual(invalid["rows"][0]["action"], "error")
+        self.assertIn(
+            "Product image URL #2 must use HTTP or HTTPS.",
+            invalid["rows"][0]["errors"],
+        )
 
     def test_import_plan_requires_an_unambiguous_category_path(self):
         item = {"part_number": "NEW-1", "name": "New Part", "category": "Fastening"}

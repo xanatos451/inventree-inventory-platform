@@ -32,6 +32,9 @@
     .image-preview { display:grid; gap:5px; min-width:130px; }
     .image-preview img { width:120px; height:90px; object-fit:contain; border:1px solid var(--border); border-radius:5px; background:white; }
     .image-preview a { max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .image-gallery-preview { display:flex; flex-wrap:wrap; gap:8px; min-width:280px; align-items:flex-start; }
+    .image-gallery-preview .image-preview { min-width:90px; }
+    .image-gallery-preview .image-preview img { width:88px; height:66px; }
     table { width:100%; border-collapse:collapse; margin:12px 0; }
     th, td { border:1px solid var(--border); padding:7px; text-align:left; vertical-align:top; }
     th { background:var(--head); position:sticky; top:0; z-index:1; }
@@ -180,7 +183,8 @@
       const standardTargets = [
         ["part_number", "Part Number"], ["name", "Name"], ["description", "Description"],
         ["category", "Category"], ["subcategory", "Subcategory"], ["variant", "Variant"],
-        ["quantity", "Quantity"], ["notes", "Notes"], ["image_url", "Primary Image URL"]
+        ["quantity", "Quantity"], ["notes", "Notes"], ["image_url", "Primary Image URL"],
+        ["image_urls", "Product Image Gallery"]
       ];
       let selectedProfileId = null;
       let profiles = [];
@@ -209,6 +213,25 @@
         } catch {
           return `<code>${escapeHtml(raw)}</code>`;
         }
+      }
+
+      function imageGalleryPreview(value) {
+        let urls = Array.isArray(value) ? value : [];
+        if (!urls.length) {
+          const raw = String(value ?? "").trim();
+          if (raw.startsWith("[")) {
+            try {
+              const parsed = JSON.parse(raw);
+              if (Array.isArray(parsed)) urls = parsed;
+            } catch {}
+          }
+          if (!urls.length && raw) urls = raw.split(/\r?\n/);
+        }
+        urls = [...new Set(urls.map((url) => String(url ?? "").trim()).filter(Boolean))];
+        if (!urls.length) return "—";
+        const visible = urls.slice(0, 8).map((url) => imagePreview(url)).join("");
+        const remainder = urls.length > 8 ? `<span>+${urls.length - 8} more</span>` : "";
+        return `<div class="image-gallery-preview">${visible}${remainder}<strong>${urls.length} image${urls.length === 1 ? "" : "s"}</strong></div>`;
       }
 
       function setStatus(message, kind="") {
@@ -404,7 +427,7 @@
         const keys = Array.from(new Set(items.flatMap((item) => Object.keys(item))));
         container.innerHTML = `<table><thead><tr><th>Row</th>${keys.map((key) => `<th>${escapeHtml(key)}</th>`).join("")}</tr></thead>
           <tbody>${items.map((item,index) => `<tr><td>${index + 1}</td>${keys.map((key) =>
-            `<td>${key === "image_url" ? imagePreview(item[key]) : `<code>${escapeHtml(item[key] ?? "")}</code>`}</td>`
+            `<td>${key === "image_url" ? imagePreview(item[key]) : key === "image_urls" ? imageGalleryPreview(item[key]) : `<code>${escapeHtml(item[key] ?? "")}</code>`}</td>`
           ).join("")}</tr>`).join("")}</tbody></table>`;
       }
 
@@ -439,7 +462,7 @@
           const category = [row.category, row.subcategory].filter(Boolean).join(" > ");
           return `<tr><td>${row.row_index + 1}</td><td><strong>${escapeHtml(row.action)}</strong></td>
             <td><code>${escapeHtml(row.part_number)}</code></td><td>${escapeHtml(row.name)}</td>
-            <td>${escapeHtml(category)}</td><td>${imagePreview(row.mapped?.image_url)}</td><td>${row.parameter_count || 0}</td>
+            <td>${escapeHtml(category)}</td><td>${imageGalleryPreview(row.image_urls || row.mapped?.image_urls || row.mapped?.image_url)}</td><td>${row.parameter_count || 0}</td>
             <td><code>${escapeHtml([...partMatches,...supplierMatches,...categoryMatches].join("\n") || "—")}</code></td>
             <td><code>${escapeHtml(messages.join("\n") || "—")}</code></td></tr>`;
         }).join("")}</tbody></table>`;
