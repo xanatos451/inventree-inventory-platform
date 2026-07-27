@@ -1924,7 +1924,8 @@ async function captureMcmasterTab(tab, settings, selectedChildLinks) {
     throw new Error("Active tab is not a McMaster-Carr page.");
   }
 
-  if (settings.captureProfile === "single-item") {
+  const directPartUrl = /\/\d{5}[A-Z]\d{3,4}\/?(?:[?#]|$)/i.test(tab.url || "");
+  if (settings.captureProfile === "single-item" || directPartUrl) {
     const detail = await executeScraperOnTab(tab.id, scrapeMcMasterProductDetailData);
     if (!detail?.ok || !detail.row) throw new Error(detail?.error || "This is not a McMaster product-detail view.");
     return {
@@ -3822,20 +3823,92 @@ function scrapeMcMasterProductDetailData() {
     }
   }
 
-  function firstImageSrc(container) {
-    for (const image of Array.from(container?.querySelectorAll?.("img[src], img[data-src], img[data-original], source[srcset]") || [])) {
-      const alt = normalizeText(image.getAttribute("alt") || "");
-      if (/image\s*not\s*found|placeholder/i.test(alt)) continue;
-      const srcset = image.getAttribute("srcset") || "";
-      if (srcset) {
-        const first = srcset.split(",")[0]?.trim().split(" ")[0] || "";
-        const cleaned = toAbsolute(first);
-        if (cleaned) return cleaned;
+  function collectProductImageUrls(container, partNumber) {
+    const candidates = [];
+    const seen = new Set();
+    const partToken = String(partNumber || "").toLowerCase();
+    const imageExtension = /\.(?:png|jpe?g|gif|webp|avif|bmp|tiff?)(?:$|[?#])/i;
+
+    function add(raw, element, sourceRank = 0) {
+      const cleaned = toAbsolute(String(raw || "").trim());
+      if (!cleaned || !/^https?:/i.test(cleaned) || !imageExtension.test(cleaned)) return;
+
+      let parsed;
+      try {
+        parsed = new URL(cleaned);
+      } catch {
+        return;
       }
-      const cleaned = toAbsolute(image.getAttribute("src") || image.getAttribute("data-src") || image.getAttribute("data-original") || "");
-      if (cleaned) return cleaned;
+
+      const host = parsed.hostname.toLowerCase();
+      const path = parsed.pathname.toLowerCase();
+      const alt = normalizeText(element?.getAttribute?.("alt") || "").toLowerCase();
+      if (!/(?:^|\.)mcmaster\.com$/.test(host)) return;
+      if (
+        /(?:mastheadlogo|browse-catalog|categorytiles|browsecatalogcategoryimages|industrial-information-icon|placeholder|image[-_]?not[-_]?found|\/gfx\/(?:cancel|spinner|loading|print|email|logo|icon))/i.test(path) ||
+        /(?:mcmaster-carr\s+logo|image\s*not\s*found|placeholder|browse\s+catalog)/i.test(alt)
+      ) {
+        return;
+      }
+
+      const dedupeKey = `${parsed.origin}${parsed.pathname}`.toLowerCase();
+      if (seen.has(dedupeKey)) return;
+      seen.add(dedupeKey);
+
+      let score = sourceRank;
+      if (partToken && cleaned.toLowerCase().includes(partToken)) score += 100;
+      if (/image\s+of\s+(?:the\s+)?product|product\s+image|item\s+image/i.test(alt)) score += 50;
+      if (/\/contents\/gfx\/imagecache\//i.test(path)) score += 80;
+      else if (/\/contents\/gfx\/(?:large|medium|small)\//i.test(path)) score += 30;
+      if (/dimension|drawing|diagram|technical|specification/i.test(`${path} ${alt}`)) score += 10;
+      candidates.push({ url: cleaned, score, order: candidates.length });
     }
-    return "";
+
+    const root = container || document;
+    for (const image of Array.from(root.querySelectorAll(
+      "img, picture source, svg image"
+    ))) {
+      const srcsets = [
+        image.getAttribute("srcset"),
+        image.getAttribute("data-srcset")
+      ].filter(Boolean);
+      for (const srcset of srcsets) {
+        const entries = srcset
+          .split(",")
+          .map((entry) => entry.trim().split(/\s+/)[0])
+          .filter(Boolean);
+        entries.forEach((entry, index) => add(entry, image, 20 + index));
+      }
+
+      [
+        ["data-zoom-src", 45],
+        ["data-large-src", 40],
+        ["data-original", 35],
+        ["data-src", 30],
+        ["href", 25],
+        ["xlink:href", 25],
+        ["src", 10]
+      ].forEach(([attribute, rank]) => add(image.getAttribute(attribute), image, rank));
+      add(image.currentSrc, image, 15);
+
+      const linkedImage = image.closest("a[href]");
+      if (linkedImage) add(linkedImage.getAttribute("href"), image, 50);
+    }
+
+    for (const link of Array.from(root.querySelectorAll("a[href]"))) {
+      add(link.getAttribute("href"), link, 5);
+    }
+
+    for (const element of Array.from(root.querySelectorAll("[style*='url(']"))) {
+      const style = element.getAttribute("style") || "";
+      for (const match of style.matchAll(/url\(\s*(['"]?)(.*?)\1\s*\)/gi)) {
+        add(match[2], element, 5);
+      }
+    }
+
+    return candidates
+      .sort((left, right) => right.score - left.score || left.order - right.order)
+      .map((candidate) => candidate.url);
   }
 
   function parseBreadcrumbs() {
@@ -3925,7 +3998,11 @@ function scrapeMcMasterProductDetailData() {
     ? "McMaster login required for full product specifications."
     : "";
 
-  const imageUrl = firstImageSrc(document.querySelector("main, [role='main']") || document.body);
+  const imageUrls = collectProductImageUrls(
+    document.querySelector("main, [role='main']") || document.body,
+    partNumber
+  );
+  const imageUrl = imageUrls[0] || "";
   const row = {
     Product: title || (partNumber ? `Part ${partNumber}` : "Product"),
     Description: title,
@@ -3933,6 +4010,12 @@ function scrapeMcMasterProductDetailData() {
     McMasterPartNumber: partNumber,
     RowImageURL: imageUrl,
     RowImageSource: imageUrl ? "product-page" : "none",
+    ProductDetailImageURL: imageUrl,
+    ProductDetailImageURLs: imageUrls.join("\n"),
+    ProductDetailImageCount: imageUrls.length,
+    "Image URL": imageUrl,
+    "Image URLs": imageUrls.join("\n"),
+    "Image Count": imageUrls.length,
     PageBreadcrumbs: breadcrumbs,
     ProductDetailBreadcrumbs: breadcrumbs,
     ProductDetailPageTitle: title,

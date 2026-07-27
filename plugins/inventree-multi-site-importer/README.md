@@ -2,7 +2,7 @@
 
 Server-side companion to the [Multi-Site Inventory Capture Chrome extension](../../extensions/chrome-multi-site-inventree-export/README.md). The extension reads supplier pages; this plugin stores raw captures, exposes field-inspection and mapping tools, and provides the boundary for future inventory writes.
 
-> Current scope: version `0.1.19` queues captures, provides paged dataset selection and visual mapping, creates parts, validates and caches remote images before import, and automatically batches updates or overwrites of mapped fields, notes, parameters, primary images, and gallery attachments.
+> Current scope: version `0.2.1` queues captures, provides paged dataset selection and namespaced visual mapping, creates parts, imports supplier and manufacturer records in a separate stage, optionally creates idempotent stock items, validates and caches remote images before import, batches detail writes, provides selective retention cleanup, and provides a responsive Part image gallery.
 
 ## Requirements
 
@@ -12,6 +12,7 @@ Server-side companion to the [Multi-Site Inventory Capture Chrome extension](../
 - The following InvenTree global plugin settings enabled:
   - **Enable URL integration** — required for the plugin API and workspace routes.
   - **Enable app integration** — required for the plugin's capture and mapping-profile database tables.
+  - **Enable user interface integration** — required for the Product Images panel in browser Part views.
   - **Check plugins on startup** — recommended for Docker/container deployments.
 
 In the server configuration, custom plugins must also be enabled with either:
@@ -54,7 +55,7 @@ Omit `--clean` to retain existing artifacts. The script only permits output belo
 The distributable artifact is created under the consolidated repository output directory:
 
 ```text
-.artifacts/plugin/inventree_multi_site_importer-0.1.19-py3-none-any.whl
+.artifacts/plugin/inventree_multi_site_importer-0.2.1-py3-none-any.whl
 ```
 
 Before distributing it, run:
@@ -109,7 +110,7 @@ Finally restart both the InvenTree web server and background worker. InvenTree d
 Copy the wheel to a persistent path that is visible inside the InvenTree server and worker environments. Add a PEP 508 file requirement to `plugins.txt`:
 
 ```text
-inventree-multi-site-importer @ file:///absolute/path/visible/to/inventree_multi_site_importer-0.1.19-py3-none-any.whl
+inventree-multi-site-importer @ file:///absolute/path/visible/to/inventree_multi_site_importer-0.2.1-py3-none-any.whl
 ```
 
 For Docker, the wheel must be placed in a bind-mounted or persistent data path and the path in `plugins.txt` must be the path **inside the container**, not the host-only path. Run `invoke plugins`, the normal update/migration process, and restart the server and worker.
@@ -142,7 +143,7 @@ After installation and restart:
 2. Open **Admin → Plugin Settings**.
 3. Find **Multi-Site Supplier Importer** (`multi-site-importer`).
 4. Activate it.
-5. Confirm **Enable URL integration** and **Enable app integration** are enabled in global plugin settings.
+5. Confirm **Enable URL integration**, **Enable app integration**, and **Enable user interface integration** are enabled in global plugin settings.
 6. Restart the web server and worker once more if prompted or if the routes do not appear.
 7. Confirm the database migrations `0001_initial` and `0002_capture_profiles` were applied by checking the update output and server logs.
 
@@ -236,7 +237,23 @@ Use **Select dataset rows** first to include or exclude individual rows, the cur
 
 After building a ready plan, select **Create New Parts** and confirm the displayed counts. The plugin rebuilds the selected subset against current database state, checks the signed-in user's native **Part: Add** role permission, and creates every selected row still classified as `create` in one atomic transaction. Rows classified as `update` are skipped, so retrying a successful dataset does not intentionally create duplicate identifiers. Any live conflict, mapping error, model-validation failure, or write failure prevents or rolls back the entire batch.
 
-This step sets the mapped part number as `IPN`, maps name and description, assigns the uniquely resolved category, and marks the part active and purchaseable. Supplier parts, stock items, and stock transactions remain separate future steps.
+This step sets the mapped part number as `IPN`, maps name and description, assigns the uniquely resolved category, and marks the part active and purchaseable. Supplier/manufacturer records and physical stock are intentionally separate confirmed steps.
+
+### Part, supplier, manufacturer, and stock mapping
+
+Version `0.2.0` groups mapping targets by their InvenTree model:
+
+- `part.*` describes the reusable item definition, including `part.ipn`, name, category, notes, and images.
+- `parameter.*` stores searchable technical dimensions and specifications on the Part.
+- `supplier.*` creates or updates a Supplier Part identified by an existing supplier Company plus SKU. Pack quantity is the number of base-part units in one supplier pack. Optional price, currency, and price-break quantity create or update that Supplier Part's price break.
+- `manufacturer.*` creates or updates a Manufacturer Part identified by an existing manufacturer Company plus MPN.
+- `stock.*` describes a physical Stock Item. A positive quantity and one unambiguous, non-structural location are required.
+
+The workflow order is: build the plan, create missing categories, create Parts, import Part details, import procurement records, then optionally enable and create stock. Supplier and manufacturer Companies must already exist and have their corresponding role enabled; the importer does not silently create companies.
+
+Stock creation is disabled by default and requires an explicit checkbox and confirmation. It never overwrites an existing quantity. A capture-row ledger makes retries idempotent: rows which already created stock are skipped.
+
+Existing flat profiles remain accepted. The workspace translates `part_number`, `name`, `description`, `category`, `subcategory`, `notes`, `image_url`, and `image_urls` to their `part.*` equivalents when loading.
 
 ## Import notes, parameters, and images
 
@@ -259,7 +276,99 @@ Before importing details, select **Validate & Prefetch Images**. The workspace s
 
 Detail import refuses to proceed while the selected capture has unresolved failed prefetch entries. Ready files are read from the cache instead of downloaded again. Excluded URLs are counted and skipped. If the original primary URL is excluded, the next available normalized gallery image becomes the primary candidate. Cache entries and files expire lazily after seven days by default; configure this with **Image prefetch cache retention**.
 
+### Capture retention and cleanup
+
+Version `0.2.1` records the first time each capture writes Parts, Part details or images, supplier/manufacturer records, or stock. Existing captures already marked complete are conservatively recorded as imported during migration. All other pre-`0.2.1` captures are initially pinned because older detail-only imports did not update capture status. After reviewing a legacy capture, an administrator can unpin it from its workspace to make it eligible. Imported captures and pinned captures are never offered for destructive cleanup.
+
+#### Storage model
+
+The plugin does not select a NAS or other independent storage location. It uses the storage already configured for the InvenTree installation:
+
+| Data | Primary location | Cleanup behavior |
+| --- | --- | --- |
+| Raw capture payload and import provenance | InvenTree database | Eligible unimported captures can be deleted |
+| Prefetch manifest and validation results | InvenTree database | Deleted with its prefetch file or capture |
+| Prefetched image files | InvenTree default media storage under `multi-site-importer/prefetch/<capture-id>/` | Can expire or be cleared independently |
+| Imported primary images and gallery attachments | Normal InvenTree media storage | Never deleted by importer cleanup |
+| Parts, parameters, supplier/manufacturer records, and stock | InvenTree database | Never deleted by importer cleanup |
+
+The recommended deployment uses persistent local disks or local Docker volumes for the live InvenTree database and media storage. A NAS can remain a backup destination only; it does not need to be mounted into the InvenTree containers or used as `MEDIA_ROOT`.
+
+From the directory containing the installed Compose file, verify the configured media path:
+
+```bash
+docker compose exec inventree-server \
+  python manage.py shell -c \
+  "from django.conf import settings; print('MEDIA_ROOT=', settings.MEDIA_ROOT); print('MEDIA_URL=', settings.MEDIA_URL)"
+```
+
+Then verify that the reported container path is backed by persistent local storage:
+
+```bash
+docker inspect "$(docker compose ps -q inventree-server)" \
+  --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+
+docker compose config
+```
+
+Do not rely on an unmounted container filesystem for media or database storage, because container recreation can discard it.
+
+#### Manual cleanup
+
+Administrators can open **Capture retention and cleanup** in any capture workspace. The selectable table contains only unpinned captures with no inventory-write record and no stock-import ledger. Two confirmed actions are available:
+
+- **Clear Selected Prefetch Cache** removes cached preflight files but retains the raw captures.
+- **Delete Selected Captures & Cache** removes the selected raw captures and cascades through their cached preflight files.
+
+Neither action deletes Parts, parameters, Part attachments, supplier/manufacturer records, stock, or mapping profiles. Any capture which becomes ineligible between preview and submission is rejected by the server.
+
+#### Scheduled cleanup
+
+For scheduled cleanup, first run a dry run:
+
+```bash
+docker compose exec inventree-server python manage.py cleanup_multi_site_importer \
+  --capture-days 30 --prefetch-days 7
+```
+
+Then schedule the executing form using cron or the homeserver's task scheduler:
+
+```bash
+docker compose exec inventree-server python manage.py cleanup_multi_site_importer \
+  --capture-days 30 --prefetch-days 7 --execute
+```
+
+The command remains a dry run unless `--execute` is supplied. Expired raw captures use the same conservative eligibility rules as the manual interface. Expired prefetch cache records can be removed independently because they are temporary downloads; images already copied into Parts and attachments are separate media files and remain intact.
+
+The command-line values are authoritative for each scheduled run. The plugin settings display the recommended defaults of 30 days for unimported captures and 7 days for prefetch cache, but the management command does not silently override explicitly supplied values.
+
+Run cleanup before the backup window when temporary prefetch downloads should not be copied to backup storage. A typical order is:
+
+1. Execute importer cleanup on the homeserver.
+2. Run the normal InvenTree database and media backup.
+3. Copy or synchronize the resulting backup to the NAS.
+
+When the backup tool operates directly on the live media directory, `multi-site-importer/prefetch/` may be excluded to avoid backing up reproducible temporary downloads. Do not exclude the rest of InvenTree media: imported Part images and gallery attachments are permanent inventory media. Raw captures live in the database, so database backups contain them until the retention command removes eligible captures.
+
+Recommended starting policy:
+
+| Data | Suggested retention |
+| --- | ---: |
+| Unpinned, unimported raw captures | 30 days |
+| Prefetched image cache | 7 days |
+| Pinned captures | Until manually unpinned |
+| Imported capture provenance | Retained |
+| Imported inventory and media | Normal InvenTree retention |
+
 Version `0.1.19` canonicalizes the previously server-generated `0003_alter_captureimport_id_alter_mappingprofile_id` migration and places the image manifest in `0004_imageprefetch`. This keeps upgrades linear on installations where InvenTree had already generated the primary-key migration locally.
+
+## View product images
+
+Version `0.1.20` adds a **Product Images** panel to browser Part pages. It presents the primary image and image-file attachments in a responsive thumbnail grid. Select a thumbnail to open the full-size file, follow the original supplier URL when the importer recorded one, press Escape or select the backdrop to close the viewer, and use **Reload** after attachments change. The panel follows InvenTree's active light or dark theme and can be disabled with the plugin's **Enable part image gallery** setting.
+
+This panel requires InvenTree's global **Enable user interface integration** plugin setting. It is responsive and therefore also works when the normal InvenTree web interface is opened in a mobile browser.
+
+The native InvenTree mobile app does not load web-interface plugin panels. Imported gallery images remain standard uploaded Part attachments, rather than plugin-only data, so compatible mobile-app versions can access them through the Part attachment view and API. The imported primary image remains the normal native Part image. Thumbnail generation is handled asynchronously by the InvenTree worker; if a newly imported attachment initially shows a generic file entry, confirm the worker is running and allow it time to generate the preview.
 
 If one or more mapped paths are missing, the workspace enables **Create Missing Categories**. Review the paths shown by the plan and confirm the prompt. The plugin creates only the absent hierarchy segments, reuses existing segments, and then rebuilds the read-only plan. A persistent result panel lists each created and reused category with its database ID and confirms whether every mapped path was resolved. The signed-in user must have InvenTree's native **Part Category: Add** role permission; the plugin checks this through InvenTree's role-aware permission system. This action does not create or update parts.
 
@@ -344,6 +453,7 @@ All routes require normal InvenTree authentication and are mounted under:
 | Method | Route | Purpose |
 |---|---|---|
 | `GET` | `health/` | Verify plugin routing and authentication |
+| `GET` | `parts/{id}/image-gallery/` | List a Part's primary image and image attachments for the browser gallery |
 | `GET`, `POST` | `captures/` | List or submit raw captures |
 | `GET` | `captures/{id}/` | Retrieve a queued capture |
 | `GET` | `captures/{id}/workspace/` | Open the human-readable field workspace |

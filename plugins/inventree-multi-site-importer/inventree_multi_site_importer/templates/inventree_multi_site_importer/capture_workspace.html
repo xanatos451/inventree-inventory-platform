@@ -59,10 +59,26 @@
   data-capture-profile="{{ capture.capture_profile }}"
   data-page-type="{{ capture.page_type }}"
   data-row-count="{{ capture.row_count }}"
+  data-pinned="{{ capture.pinned|yesno:'true,false' }}"
 >
   {% csrf_token %}
   <h1>Capture #{{ capture.pk }} mapping workspace</h1>
   <div class="meta">{{ capture.source }} · {{ capture.capture_profile }} · {{ capture.page_type }} · {{ capture.row_count }} rows · {{ capture.page_title }}</div>
+
+  {% if request.user.is_staff %}
+  <details class="panel">
+    <summary>Capture retention and cleanup</summary>
+    <p class="hint">Only unpinned captures with no recorded Part, detail/image, supplier/manufacturer, or stock writes are eligible. Imported inventory is never deleted.</p>
+    <div class="actions">
+      <button id="refreshCleanupBtn" class="secondary" type="button">Refresh Eligible Captures</button>
+      <button id="pinCurrentCaptureBtn" class="secondary" type="button">{{ capture.pinned|yesno:"Unpin,Pin" }} Current Capture</button>
+      <button id="clearSelectedPrefetchBtn" class="danger" type="button" disabled>Clear Selected Prefetch Cache</button>
+      <button id="deleteSelectedCapturesBtn" class="danger" type="button" disabled>Delete Selected Captures &amp; Cache</button>
+    </div>
+    <div id="cleanupResult" class="status" role="status" aria-live="polite"></div>
+    <div id="cleanupTable" class="preview-wrap"></div>
+  </details>
+  {% endif %}
 
   <section class="panel">
     <h2>Select dataset rows</h2>
@@ -141,10 +157,18 @@
         </select>
       </label>
       <button id="importDetailsBtn" type="button" disabled>Import Notes, Parameters &amp; Images</button>
+      <button id="importProcurementBtn" type="button" disabled>Import Supplier &amp; Manufacturer Records</button>
     </div>
     <div id="categoryCreationResult" class="status" role="status" aria-live="polite"></div>
     <div id="partCreationResult" class="status" role="status" aria-live="polite"></div>
     <div id="detailImportResult" class="status" role="status" aria-live="polite"></div>
+    <div id="procurementImportResult" class="status" role="status" aria-live="polite"></div>
+    <div class="actions">
+      <label><input id="enableStockImport" type="checkbox" /> Enable physical stock creation</label>
+      <button id="createStockBtn" class="danger" type="button" disabled>Create Stock Items</button>
+    </div>
+    <p class="hint">Stock is a separate, opt-in stage. Each selected capture row can create stock only once.</p>
+    <div id="stockImportResult" class="status" role="status" aria-live="polite"></div>
     <div class="actions">
       <button id="prefetchImagesBtn" type="button" disabled>Validate &amp; Prefetch Images</button>
       <button id="retryFailedImagesBtn" class="secondary" type="button" disabled>Retry Failed Images</button>
@@ -212,16 +236,37 @@
       const captureProfile = body.dataset.captureProfile;
       const pageType = body.dataset.pageType;
       const rowCount = Number(body.dataset.rowCount || 0);
+      let currentCapturePinned = body.dataset.pinned === "true";
       const fields = JSON.parse(document.getElementById("source-fields-data").textContent);
       const samples = JSON.parse(document.getElementById("source-samples-data").textContent);
       const csrfToken = document.querySelector("[name=csrfmiddlewaretoken]")?.value || "";
       const basePath = "/plugin/multi-site-importer/";
       const standardTargets = [
-        ["part_number", "Part Number"], ["name", "Name"], ["description", "Description"],
-        ["category", "Category"], ["subcategory", "Subcategory"], ["variant", "Variant"],
-        ["quantity", "Quantity"], ["notes", "Notes"], ["image_url", "Primary Image URL"],
-        ["image_urls", "Product Image Gallery"]
+        ["part.ipn", "Part · IPN"], ["part.name", "Part · Name"],
+        ["part.description", "Part · Description"], ["part.category", "Part · Category"],
+        ["part.subcategory", "Part · Subcategory"], ["part.notes", "Part · Notes"],
+        ["part.image_url", "Part · Primary Image URL"], ["part.image_urls", "Part · Image Gallery"],
+        ["supplier.company", "Supplier · Company"], ["supplier.sku", "Supplier · SKU"],
+        ["supplier.description", "Supplier · Description"], ["supplier.link", "Supplier · Product URL"],
+        ["supplier.packaging", "Supplier · Packaging"], ["supplier.pack_quantity", "Supplier · Pack Quantity"],
+        ["supplier.notes", "Supplier · Notes"], ["supplier.active", "Supplier · Active"],
+        ["supplier.primary", "Supplier · Primary"],
+        ["supplier.price", "Supplier · Unit Price"], ["supplier.price_quantity", "Supplier · Price-Break Quantity"],
+        ["supplier.price_currency", "Supplier · Price Currency"],
+        ["manufacturer.company", "Manufacturer · Company"], ["manufacturer.mpn", "Manufacturer · MPN"],
+        ["manufacturer.description", "Manufacturer · Description"], ["manufacturer.link", "Manufacturer · Product URL"],
+        ["stock.quantity", "Stock · Quantity"], ["stock.location", "Stock · Location"],
+        ["stock.batch", "Stock · Batch"], ["stock.serial", "Stock · Serial"],
+        ["stock.status", "Stock · Status Code"], ["stock.packaging", "Stock · Packaging"],
+        ["stock.purchase_price", "Stock · Unit Purchase Price"], ["stock.price_currency", "Stock · Price Currency"],
+        ["stock.link", "Stock · Source URL"], ["stock.notes", "Stock · Notes"]
       ];
+      const legacyTargets = {
+        part_number:"part.ipn", IPN:"part.ipn", name:"part.name",
+        description:"part.description", category:"part.category",
+        subcategory:"part.subcategory", notes:"part.notes",
+        image_url:"part.image_url", image_urls:"part.image_urls"
+      };
       let selectedProfileId = null;
       let profiles = [];
       let lastPlan = null;
@@ -230,11 +275,67 @@
       const datasetPageSize = 100;
       let visibleDatasetIndices = [];
       const selectedRowIndices = new Set(Array.from({length:rowCount}, (_value, index) => index));
+      const selectedCleanupCaptureIds = new Set();
 
       const $ = (id) => document.getElementById(id);
       const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
         "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
       }[char]));
+
+      function formatBytes(value) {
+        let bytes = Number(value || 0);
+        const units = ["B", "KB", "MB", "GB"];
+        let unit = 0;
+        while (bytes >= 1024 && unit < units.length - 1) { bytes /= 1024; unit += 1; }
+        return `${bytes.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+      }
+
+      function cleanupSelectionChanged() {
+        for (const id of ["clearSelectedPrefetchBtn", "deleteSelectedCapturesBtn"]) {
+          if ($(id)) $(id).disabled = !selectedCleanupCaptureIds.size;
+        }
+      }
+
+      async function loadCleanupCatalog() {
+        if (!$("cleanupTable")) return;
+        const result = await api("captures/cleanup/");
+        const captures = result.captures || [];
+        selectedCleanupCaptureIds.clear();
+        cleanupSelectionChanged();
+        $("cleanupTable").innerHTML = captures.length ? `<table><thead><tr>
+          <th>Select</th><th>Capture</th><th>Source</th><th>Created</th><th>Rows</th><th>Prefetch cache</th><th>Page</th>
+        </tr></thead><tbody>${captures.map((item) => `<tr>
+          <td><input class="cleanup-select" type="checkbox" data-id="${item.pk}" /></td>
+          <td>#${item.pk}</td><td>${escapeHtml(item.source)}</td>
+          <td>${escapeHtml(new Date(item.created_at).toLocaleString())}</td>
+          <td>${item.row_count}</td><td>${item.prefetch_count} files · ${formatBytes(item.prefetch_bytes)}</td>
+          <td><a href="${escapeHtml(item.page_url)}" target="_blank" rel="noreferrer">${escapeHtml(item.page_title || item.page_url)}</a></td>
+        </tr>`).join("")}</tbody></table>` : "<p>No captures are currently eligible for cleanup.</p>";
+        for (const checkbox of document.querySelectorAll(".cleanup-select")) {
+          checkbox.addEventListener("change", () => {
+            const id = Number(checkbox.dataset.id);
+            if (checkbox.checked) selectedCleanupCaptureIds.add(id);
+            else selectedCleanupCaptureIds.delete(id);
+            cleanupSelectionChanged();
+          });
+        }
+      }
+
+      async function runManualCleanup(action) {
+        const ids = Array.from(selectedCleanupCaptureIds);
+        if (!ids.length) throw new Error("Select at least one eligible capture.");
+        const label = action === "delete_captures"
+          ? "permanently delete the selected raw captures and cached prefetch files"
+          : "delete cached prefetch files for the selected captures";
+        if (!confirm(`Really ${label}? Imported inventory records and Part attachments are not affected.`)) return;
+        const result = await api("captures/cleanup/", {
+          method:"POST", body:JSON.stringify({capture_ids:ids, action, confirm:true})
+        });
+        $("cleanupResult").className = "status visible ok";
+        $("cleanupResult").textContent = `${result.capture_count} captures and ${result.prefetch_count} cached files removed (${formatBytes(result.prefetch_bytes)}).` +
+          (result.rejected_capture_ids.length ? ` Protected or ineligible captures skipped: ${result.rejected_capture_ids.join(", ")}.` : "");
+        await loadCleanupCatalog();
+      }
 
       function selectedRowsPayload() {
         return Array.from(selectedRowIndices).sort((left, right) => left - right);
@@ -246,6 +347,8 @@
         $("createCategoriesBtn").disabled = true;
         $("createPartsBtn").disabled = true;
         $("importDetailsBtn").disabled = true;
+        $("importProcurementBtn").disabled = true;
+        $("createStockBtn").disabled = true;
         $("prefetchImagesBtn").disabled = true;
         $("retryFailedImagesBtn").disabled = true;
         $("excludeFailedImagesBtn").disabled = true;
@@ -446,7 +549,8 @@
 
       function applyRules(rules={}) {
         resetRules();
-        for (const [target, rule] of Object.entries(rules || {})) {
+        for (const [rawTarget, rule] of Object.entries(rules || {})) {
+          const target = legacyTargets[rawTarget] || rawTarget;
           const standard = Array.from($("standardRules").children).find((row) => row.querySelector(".rule-target").value === target);
           if (standard) {
             standard.querySelector(".rule-mode").value = rule.template ? "template" : "single";
@@ -540,6 +644,14 @@
         $("importDetailsBtn").title = summary.create
           ? "Create the selected new parts first."
           : "Write mapped notes and parameters, then download primary and gallery images.";
+        const procurementRows = (plan.rows || []).filter(
+          (row) => row.supplier_action !== "none" || row.manufacturer_action !== "none"
+        );
+        $("importProcurementBtn").disabled = !plan.ready || !!summary.create || !procurementRows.length;
+        const stockRows = (plan.rows || []).filter((row) => row.stock_action !== "none");
+        $("createStockBtn").disabled = (
+          !plan.ready || !!summary.create || !stockRows.length || !$("enableStockImport").checked
+        );
         const plannedImageCount = (plan.rows || []).reduce(
           (total, row) => total + Number(row.image_count || 0), 0
         );
@@ -857,6 +969,39 @@
         }
       }
 
+      async function importProcurement() {
+        if (!lastPlan?.ready || lastPlan.summary?.create) throw new Error("Create all selected Parts first.");
+        if (!confirm("Create or update the mapped Supplier Parts and Manufacturer Parts? Companies must already exist in InvenTree.")) return;
+        const node = $("procurementImportResult");
+        node.className = "status visible";
+        node.textContent = "Importing procurement records…";
+        const result = await api(`captures/${captureId}/procurement/`, {
+          method:"POST", body:JSON.stringify({
+            rules:collectRules(), selected_row_indices:selectedRowsPayload(),
+            existing_part_mode:$("existingPartMode").value, confirm:true
+          })
+        });
+        node.className = "status visible ok";
+        node.textContent = `Supplier Parts: ${result.supplier_created} created, ${result.supplier_updated} updated. Manufacturer Parts: ${result.manufacturer_created} created, ${result.manufacturer_updated} updated.`;
+        await buildPlan({announce:false});
+      }
+
+      async function createStock() {
+        if (!$("enableStockImport").checked) throw new Error("Enable physical stock creation first.");
+        if (!confirm("Create physical Stock Items for mapped positive quantities? This is idempotent per capture row and does not update existing stock.")) return;
+        const node = $("stockImportResult");
+        node.className = "status visible";
+        node.textContent = "Creating stock items…";
+        const result = await api(`captures/${captureId}/stock/`, {
+          method:"POST", body:JSON.stringify({
+            rules:collectRules(), selected_row_indices:selectedRowsPayload(),
+            enable_stock:true, confirm:true
+          })
+        });
+        node.className = "status visible ok";
+        node.textContent = `${result.created_count} Stock Items created; ${result.skipped_count} previously imported rows skipped.`;
+      }
+
       async function saveProfile() {
         const payload = profilePayload();
         const path = selectedProfileId ? `mapping-profiles/${selectedProfileId}/` : "mapping-profiles/";
@@ -899,6 +1044,32 @@
       $("retryFailedImagesBtn").addEventListener("click", () => prefetchImages(lastPrefetchFailures.map((item) => item.url)).catch((error) => setStatus(error.message, "error")));
       $("excludeFailedImagesBtn").addEventListener("click", () => excludeFailedImagesAndProceed().catch((error) => setStatus(error.message, "error")));
       $("importDetailsBtn").addEventListener("click", () => importPartDetails().catch((error) => setStatus(error.message, "error")));
+      $("importProcurementBtn").addEventListener("click", () => importProcurement().catch((error) => setStatus(error.message, "error")));
+      $("createStockBtn").addEventListener("click", () => createStock().catch((error) => setStatus(error.message, "error")));
+      $("enableStockImport").addEventListener("change", () => {
+        const rows = lastPlan?.rows || [];
+        $("createStockBtn").disabled = !lastPlan?.ready || !!lastPlan?.summary?.create ||
+          !rows.some((row) => row.stock_action !== "none") || !$("enableStockImport").checked;
+      });
+      $("refreshCleanupBtn")?.addEventListener("click", () =>
+        loadCleanupCatalog().catch((error) => setStatus(error.message, "error"))
+      );
+      $("clearSelectedPrefetchBtn")?.addEventListener("click", () =>
+        runManualCleanup("clear_prefetch").catch((error) => setStatus(error.message, "error"))
+      );
+      $("deleteSelectedCapturesBtn")?.addEventListener("click", () =>
+        runManualCleanup("delete_captures").catch((error) => setStatus(error.message, "error"))
+      );
+      $("pinCurrentCaptureBtn")?.addEventListener("click", async () => {
+        try {
+          const result = await api(`captures/${captureId}/pin/`, {
+            method:"POST", body:JSON.stringify({pinned:!currentCapturePinned})
+          });
+          currentCapturePinned = result.pinned;
+          $("pinCurrentCaptureBtn").textContent = `${currentCapturePinned ? "Unpin" : "Pin"} Current Capture`;
+          await loadCleanupCatalog();
+        } catch (error) { setStatus(error.message, "error"); }
+      });
       $("saveProfileBtn").addEventListener("click", () => saveProfile().catch((error) => setStatus(error.message, "error")));
       $("newProfileBtn").addEventListener("click", () => loadProfile(null));
       $("loadProfileBtn").addEventListener("click", () => {
@@ -918,6 +1089,12 @@
       resetRules();
       refreshProfiles().catch((error) => setStatus(`Could not load profiles: ${error.message}`, "error"));
       loadDatasetPage().catch((error) => setStatus(`Could not load dataset rows: ${error.message}`, "error"));
+      loadCleanupCatalog().catch((error) => {
+        if ($("cleanupResult")) {
+          $("cleanupResult").className = "status visible error";
+          $("cleanupResult").textContent = `Could not load cleanup candidates: ${error.message}`;
+        }
+      });
     })();
   </script>
 </body>

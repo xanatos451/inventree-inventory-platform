@@ -48,9 +48,13 @@ class CaptureImportSerializer(serializers.ModelSerializer):
         fields = [
             "pk", "contract_version", "capture_profile", "source", "page_type", "page_title",
             "page_url", "captured_at", "payload", "row_count", "status",
-            "profile", "error", "created_at", "updated_at",
+            "profile", "error", "inventory_written_at", "imported_stages",
+            "pinned", "created_at", "updated_at",
         ]
-        read_only_fields = ["pk", "row_count", "status", "error", "created_at", "updated_at"]
+        read_only_fields = [
+            "pk", "row_count", "status", "error", "inventory_written_at",
+            "imported_stages", "pinned", "created_at", "updated_at",
+        ]
 
     def validate_payload(self, payload):
         if not isinstance(payload, dict):

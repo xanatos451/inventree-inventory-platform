@@ -306,6 +306,41 @@ class CaptureContractTests(unittest.TestCase):
         self.assertEqual(result["rows"][0]["row_index"], 0)
         self.assertEqual(result["rows"][0]["context"], {"Part": "A1"})
 
+    def test_namespaced_part_mapping_keeps_legacy_import_compatibility(self):
+        mapped = map_row(
+            {"sku": "ABC", "images": "https://example.com/a.jpg"},
+            {
+                "part.ipn": {"source_field": "sku"},
+                "part.image_urls": {"source_field": "images"},
+            },
+        )
+        self.assertEqual(mapped["part.ipn"], "ABC")
+        self.assertEqual(mapped["part_number"], "ABC")
+        self.assertEqual(mapped["image_url"], "https://example.com/a.jpg")
+
+    def test_plan_separates_procurement_and_stock_identity(self):
+        plan = build_import_plan(
+            [{
+                "part.ipn": "M5-10", "part.name": "M5 insert",
+                "supplier.company": "Supplier A", "supplier.sku": "SKU-7",
+                "manufacturer.company": "Maker A", "manufacturer.mpn": "MPN-9",
+                "stock.quantity": "25", "stock.location": "Bin 4",
+            }],
+            part_lookup=lambda _ipn: [{"pk": 1}],
+            supplier_lookup=lambda company, sku: (
+                [{"pk": 2, "part_id": 1}]
+                if (company, sku) == ("Supplier A", "SKU-7") else []
+            ),
+            company_lookup=lambda name, role: [{"pk": 3, "name": name}],
+            manufacturer_lookup=lambda company, mpn: [],
+            location_lookup=lambda name: [{"pk": 4, "name": name}],
+        )
+        row = plan["rows"][0]
+        self.assertTrue(plan["ready"])
+        self.assertEqual(row["supplier_action"], "update")
+        self.assertEqual(row["manufacturer_action"], "create")
+        self.assertEqual(row["stock_action"], "create-disabled")
+
 
 if __name__ == "__main__":
     unittest.main()

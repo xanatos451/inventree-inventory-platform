@@ -18,6 +18,7 @@ class PluginLoadingTests(unittest.TestCase):
         mixins_module.AppMixin = type("AppMixin", (), {})
         mixins_module.SettingsMixin = type("SettingsMixin", (), {})
         mixins_module.UrlsMixin = type("UrlsMixin", (), {})
+        mixins_module.UserInterfaceMixin = type("UserInterfaceMixin", (), {})
         django_urls_module.include = lambda module_name: (module_name, None, None)
         django_urls_module.path = lambda route, view: (route, view)
 
@@ -37,7 +38,7 @@ class PluginLoadingTests(unittest.TestCase):
             core = importlib.import_module(f"{package_name}.core")
             patterns = core.MultiSiteImporterPlugin().setup_urls()
 
-        self.assertEqual(package.PLUGIN_VERSION, "0.1.19")
+        self.assertEqual(package.PLUGIN_VERSION, "0.2.1")
         self.assertEqual(patterns[0][1][0], f"{package_name}.urls")
         self.assertNotIn(f"{package_name}.urls", sys.modules)
         self.assertNotIn(f"{package_name}.models", sys.modules)
@@ -48,7 +49,7 @@ class PluginLoadingTests(unittest.TestCase):
             / "inventree_multi_site_importer"
             / "models.py"
         ).read_text(encoding="utf-8")
-        self.assertEqual(models_source.count('app_label = "inventree_multi_site_importer"'), 3)
+        self.assertEqual(models_source.count('app_label = "inventree_multi_site_importer"'), 4)
 
     def test_views_use_inventree_configured_authentication(self):
         views_source = (
@@ -129,6 +130,51 @@ class PluginLoadingTests(unittest.TestCase):
         self.assertIn('key === "image_url" ? imagePreview(item[key])', template)
         self.assertIn('referrerpolicy="no-referrer"', template)
         self.assertIn("def validate_rules", serializers)
+
+    def test_part_image_gallery_panel_and_static_asset_are_packaged(self):
+        root = __import__("pathlib").Path(__file__).parents[1]
+        core = (root / "inventree_multi_site_importer" / "core.py").read_text(
+            encoding="utf-8"
+        )
+        urls = (root / "inventree_multi_site_importer" / "urls.py").read_text(
+            encoding="utf-8"
+        )
+        gallery = (
+            root
+            / "inventree_multi_site_importer"
+            / "static"
+            / "part_image_gallery.js"
+        ).read_text(encoding="utf-8")
+        self.assertIn("UserInterfaceMixin", core)
+        self.assertIn("ENABLE_PART_IMAGE_GALLERY", core)
+        self.assertIn("part_image_gallery.js:renderPartImageGallery", core)
+        self.assertIn('parts/<int:pk>/image-gallery/', urls)
+        self.assertIn("export function renderPartImageGallery", gallery)
+        self.assertIn("gridTemplateColumns", gallery)
+        self.assertIn('role: "dialog"', gallery)
+
+    def test_retention_cleanup_is_conservative_and_packaged(self):
+        root = __import__("pathlib").Path(__file__).parents[1]
+        models_source = (
+            root / "inventree_multi_site_importer" / "models.py"
+        ).read_text(encoding="utf-8")
+        cleanup_source = (
+            root / "inventree_multi_site_importer" / "cleanup.py"
+        ).read_text(encoding="utf-8")
+        command_source = (
+            root / "inventree_multi_site_importer" / "management"
+            / "commands" / "cleanup_multi_site_importer.py"
+        ).read_text(encoding="utf-8")
+        urls = (root / "inventree_multi_site_importer" / "urls.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("inventory_written_at", models_source)
+        self.assertIn("imported_stages", models_source)
+        self.assertIn("pinned", models_source)
+        self.assertIn("inventory_written_at__isnull=True", cleanup_source)
+        self.assertIn("stock_write_count=0", cleanup_source)
+        self.assertIn("--execute", command_source)
+        self.assertIn('path("captures/cleanup/"', urls)
 
 
 if __name__ == "__main__":

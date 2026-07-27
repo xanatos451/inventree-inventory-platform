@@ -7,8 +7,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.shortcuts import render
 from django.db import transaction
+from django.utils import timezone
 
-from .models import CaptureImport, ImagePrefetch, MappingProfile
+from .cleanup import capture_cleanup_catalog, cleanup_selected
+from .models import CaptureImport, ImagePrefetch, MappingProfile, StockImportRecord
 from .mapping import map_row, preview_rows
 from .planning import build_import_plan
 from .inspection import display_value, field_catalog, inspect_field, ordered_fields
@@ -18,6 +20,113 @@ from .remote_images import RemoteImageError, download_remote_image
 
 
 logger = logging.getLogger(__name__)
+
+
+def _mark_inventory_write(capture, stage):
+    """Conservatively protect a capture once an inventory stage writes data."""
+    stages = list(capture.imported_stages or [])
+    if stage not in stages:
+        stages.append(stage)
+    capture.inventory_written_at = capture.inventory_written_at or timezone.now()
+    capture.imported_stages = stages
+    capture.save(update_fields=["inventory_written_at", "imported_stages", "updated_at"])
+
+
+def _field_file_url(field):
+    """Return a storage-backed file URL without failing on an empty field."""
+    if not field:
+        return ""
+    try:
+        return field.url
+    except (AttributeError, ValueError):
+        return ""
+
+
+def _thumbnail_url(instance):
+    """Return the best available generated thumbnail for an image field."""
+    for attribute in ("thumbnail", "preview"):
+        value = getattr(instance, attribute, None)
+        url = _field_file_url(value)
+        if url:
+            return url
+    return ""
+
+
+class PartImageGalleryView(APIView):
+    """Return primary and attached images for a Part gallery panel."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, pk):
+        from part.models import Part
+
+        try:
+            part = Part.objects.get(pk=pk)
+        except Part.DoesNotExist:
+            return Response(
+                {"detail": "Part not found."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        images = []
+        seen_urls = set()
+        primary_url = _field_file_url(part.image)
+        if primary_url:
+            seen_urls.add(primary_url)
+            images.append(
+                {
+                    "id": "primary",
+                    "kind": "primary",
+                    "url": primary_url,
+                    "thumbnail_url": _thumbnail_url(part.image) or primary_url,
+                    "filename": getattr(part.image, "name", "").rsplit("/", 1)[-1],
+                    "comment": "Primary image",
+                    "source_url": "",
+                }
+            )
+
+        for attachment in part.attachments.all().order_by("pk"):
+            is_image = getattr(attachment, "is_image", False)
+            if callable(is_image):
+                is_image = is_image()
+            if not is_image:
+                continue
+
+            image_url = _field_file_url(attachment.attachment)
+            if not image_url or image_url in seen_urls:
+                continue
+            seen_urls.add(image_url)
+
+            comment = attachment.comment or ""
+            source_url = ""
+            prefix = "Imported product image: "
+            if comment.startswith(prefix):
+                source_url = comment[len(prefix) :].strip()
+
+            images.append(
+                {
+                    "id": attachment.pk,
+                    "kind": "attachment",
+                    "url": image_url,
+                    "thumbnail_url": (
+                        _thumbnail_url(attachment) or image_url
+                    ),
+                    "filename": getattr(
+                        attachment.attachment, "name", ""
+                    ).rsplit("/", 1)[-1],
+                    "comment": comment,
+                    "source_url": source_url,
+                }
+            )
+
+        return Response(
+            {
+                "part_id": part.pk,
+                "part_name": part.name,
+                "count": len(images),
+                "images": images,
+            }
+        )
 
 
 def _mapped_capture_items(capture, rules, request_data):
@@ -35,8 +144,9 @@ def _mapped_capture_items(capture, rules, request_data):
 
 def _build_live_import_plan(mapped_items, lock_parts=False):
     """Build a plan from current database state, optionally locking matches."""
-    from company.models import SupplierPart
+    from company.models import Company, ManufacturerPart, SupplierPart
     from part.models import Part, PartCategory
+    from stock.models import StockLocation
 
     @lru_cache(maxsize=2000)
     def part_lookup(identifier):
@@ -46,11 +156,33 @@ def _build_live_import_plan(mapped_items, lock_parts=False):
         return list(queryset.values("pk", "IPN", "name")[:5])
 
     @lru_cache(maxsize=2000)
-    def supplier_lookup(identifier):
+    def supplier_lookup(company, identifier):
         queryset = SupplierPart.objects.filter(SKU__iexact=identifier)
+        if company:
+            queryset = queryset.filter(supplier__name__iexact=company)
         if lock_parts:
             queryset = queryset.select_for_update()
         return list(queryset.values("pk", "SKU", "part_id", "supplier_id")[:5])
+
+    @lru_cache(maxsize=2000)
+    def manufacturer_lookup(company, identifier):
+        queryset = ManufacturerPart.objects.filter(MPN__iexact=identifier)
+        if company:
+            queryset = queryset.filter(manufacturer__name__iexact=company)
+        return list(queryset.values("pk", "MPN", "part_id", "manufacturer_id")[:5])
+
+    @lru_cache(maxsize=1000)
+    def company_lookup(name, role):
+        filters = {"name__iexact": name}
+        filters["is_supplier" if role == "supplier" else "is_manufacturer"] = True
+        return list(Company.objects.filter(**filters).values("pk", "name")[:5])
+
+    @lru_cache(maxsize=1000)
+    def location_lookup(path):
+        return list(
+            StockLocation.objects.filter(name__iexact=path)
+            .values("pk", "name", "structural")[:5]
+        )
 
     @lru_cache(maxsize=1000)
     def category_lookup(category, subcategory):
@@ -95,6 +227,9 @@ def _build_live_import_plan(mapped_items, lock_parts=False):
         part_lookup,
         supplier_lookup,
         category_lookup,
+        manufacturer_lookup,
+        company_lookup,
+        location_lookup,
     )
 
 
@@ -324,6 +459,8 @@ class CreateCapturePartsView(APIView):
                 capture.profile = profile
                 capture.error = ""
                 capture.save(update_fields=["status", "profile", "error", "updated_at"])
+                if created:
+                    _mark_inventory_write(capture, "parts")
         except Exception:
             logger.exception("Failed to create parts for capture_id=%s", capture.pk)
             return Response(
@@ -418,6 +555,10 @@ class ImportCapturePartDetailsView(APIView):
                 },
                 status=status.HTTP_409_CONFLICT,
             )
+
+        # File and attachment writes below are not one database transaction.
+        # Protect the capture before the first inventory mutation is attempted.
+        _mark_inventory_write(capture, "part-details")
 
         content_type = ContentType.objects.get_for_model(Part)
         parameter_names = sorted({
@@ -1062,6 +1203,246 @@ class CaptureWorkspaceView(APIView):
             "field_names": field_names,
             "field_samples": field_samples,
         })
+
+
+def _workflow_items(request, capture):
+    rules = request.data.get("rules")
+    profile_id = request.data.get("profile") or capture.profile_id
+    if profile_id:
+        rules = generics.get_object_or_404(
+            MappingProfile, pk=profile_id, is_active=True
+        ).rules
+    if not isinstance(rules, dict) or not rules:
+        raise ValueError("Provide a mapping profile or rules object.")
+    return _mapped_capture_items(capture, rules, request.data)
+
+
+def _resolved_part(row, Part):
+    ids = {item["pk"] for item in row["existing_parts"] if item.get("pk")}
+    ids.update(
+        item["part_id"] for item in row["existing_supplier_parts"]
+        if item.get("part_id")
+    )
+    if len(ids) != 1:
+        raise ValueError("Each row must resolve to exactly one existing Part.")
+    return Part.objects.get(pk=ids.pop())
+
+
+class ImportCaptureProcurementView(APIView):
+    """Write supplier/manufacturer records in a separate confirmed stage."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.data.get("confirm") is not True:
+            return Response({"detail": "Set confirm to true."}, status=400)
+        mode = str(request.data.get("existing_part_mode") or "update").lower()
+        if mode not in {"update", "overwrite"}:
+            return Response({"detail": "Invalid update mode."}, status=400)
+        from company.models import Company, ManufacturerPart, SupplierPart, SupplierPriceBreak
+        from decimal import Decimal
+        from djmoney.money import Money
+        from part.models import Part
+        from users.permissions import check_user_permission
+        capture = generics.get_object_or_404(CaptureImport, pk=pk)
+        counts = {"manufacturer_created": 0, "manufacturer_updated": 0,
+                  "supplier_created": 0, "supplier_updated": 0}
+        try:
+            plan = _build_live_import_plan(_workflow_items(request, capture))
+            if not plan["ready"] or plan["summary"]["create"]:
+                return Response({"detail": "Create all Parts and resolve plan errors first.", "rows": plan["rows"]}, status=409)
+            needed_models = []
+            if any(row["manufacturer_action"] != "none" for row in plan["rows"]):
+                needed_models.append(ManufacturerPart)
+            if any(row["supplier_action"] != "none" for row in plan["rows"]):
+                needed_models.append(SupplierPart)
+            if any(row["mapped"].get("supplier.price") for row in plan["rows"]):
+                needed_models.append(SupplierPriceBreak)
+            if any(
+                not check_user_permission(request.user, model, permission)
+                for model in needed_models
+                for permission in ("add", "change")
+            ):
+                return Response(
+                    {"detail": "Add and change permissions are required for the mapped procurement records."},
+                    status=403,
+                )
+            with transaction.atomic():
+                for row in plan["rows"]:
+                    mapped = row["mapped"]
+                    part = _resolved_part(row, Part)
+                    manufacturer_part = None
+                    company_name = str(mapped.get("manufacturer.company") or "").strip()
+                    mpn = str(mapped.get("manufacturer.mpn") or "").strip()
+                    if company_name and mpn:
+                        company = Company.objects.get(name__iexact=company_name, is_manufacturer=True)
+                        manufacturer_part, made = ManufacturerPart.objects.get_or_create(
+                            part=part, manufacturer=company, MPN=mpn
+                        )
+                        for field in ("description", "link"):
+                            value = mapped.get(f"manufacturer.{field}")
+                            if value not in (None, "") or mode == "overwrite":
+                                setattr(manufacturer_part, field, str(value or "").strip() or None)
+                        manufacturer_part.full_clean()
+                        manufacturer_part.save()
+                        counts[f"manufacturer_{'created' if made else 'updated'}"] += 1
+                    company_name = str(mapped.get("supplier.company") or "").strip()
+                    sku = str(mapped.get("supplier.sku") or "").strip()
+                    if company_name and sku:
+                        company = Company.objects.get(name__iexact=company_name, is_supplier=True)
+                        supplier_part, made = SupplierPart.objects.get_or_create(
+                            part=part, supplier=company, SKU=sku,
+                            defaults={"pack_quantity": "1"},
+                        )
+                        for field in ("description", "link", "packaging", "pack_quantity", "note"):
+                            key = "notes" if field == "note" else field
+                            value = mapped.get(f"supplier.{key}")
+                            if value not in (None, "") or mode == "overwrite":
+                                setattr(supplier_part, field, str(value or "").strip())
+                        for field in ("active", "primary"):
+                            key = f"supplier.{field}"
+                            if key in mapped:
+                                supplier_part_value = str(mapped[key]).strip().lower()
+                                setattr(
+                                    supplier_part, field,
+                                    supplier_part_value in {"1", "true", "yes", "on"},
+                                )
+                        if manufacturer_part:
+                            supplier_part.manufacturer_part = manufacturer_part
+                        supplier_part.full_clean()
+                        supplier_part.save()
+                        counts[f"supplier_{'created' if made else 'updated'}"] += 1
+                        raw_price = str(mapped.get("supplier.price") or "").strip()
+                        if raw_price:
+                            price_quantity = Decimal(
+                                str(mapped.get("supplier.price_quantity") or "1").strip()
+                            )
+                            currency = str(
+                                mapped.get("supplier.price_currency") or "USD"
+                            ).strip().upper()
+                            price_break, _made = SupplierPriceBreak.objects.update_or_create(
+                                part=supplier_part,
+                                quantity=price_quantity,
+                                defaults={"price": Money(Decimal(raw_price), currency)},
+                            )
+                            price_break.full_clean()
+                if any(counts.values()):
+                    _mark_inventory_write(capture, "procurement")
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        except Exception:
+            logger.exception("Procurement import failed for capture_id=%s", capture.pk)
+            return Response({"detail": "Procurement import failed; the batch was rolled back."}, status=400)
+        return Response({"capture_id": capture.pk, "mode": mode, **counts})
+
+
+class CreateCaptureStockView(APIView):
+    """Create stock only after an explicit opt-in, once per capture row."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        if request.data.get("confirm") is not True or request.data.get("enable_stock") is not True:
+            return Response({"detail": "Set confirm and enable_stock to true."}, status=400)
+        from decimal import Decimal, InvalidOperation
+        from djmoney.money import Money
+        from part.models import Part
+        from stock.models import StockItem, StockLocation
+        from users.permissions import check_user_permission
+        if not check_user_permission(request.user, StockItem, "add"):
+            return Response({"detail": "Stock Item add permission is required."}, status=403)
+        capture = generics.get_object_or_404(CaptureImport, pk=pk)
+        created, skipped = [], []
+        try:
+            plan = _build_live_import_plan(_workflow_items(request, capture))
+            if not plan["ready"] or plan["summary"]["create"]:
+                return Response({"detail": "Create all Parts and resolve plan errors first.", "rows": plan["rows"]}, status=409)
+            with transaction.atomic():
+                for row in plan["rows"]:
+                    mapped = row["mapped"]
+                    raw_quantity = str(mapped.get("stock.quantity") or "").strip()
+                    if not raw_quantity:
+                        continue
+                    if StockImportRecord.objects.filter(capture=capture, row_index=row["row_index"]).exists():
+                        skipped.append({"row_index": row["row_index"], "reason": "already imported"})
+                        continue
+                    try:
+                        quantity = Decimal(raw_quantity)
+                    except InvalidOperation as exc:
+                        raise ValueError(f"Row {row['row_index'] + 1}: invalid quantity.") from exc
+                    if quantity <= 0:
+                        raise ValueError(f"Row {row['row_index'] + 1}: quantity must be positive.")
+                    part = _resolved_part(row, Part)
+                    location = StockLocation.objects.get(name__iexact=str(mapped["stock.location"]).strip())
+                    if location.structural:
+                        raise ValueError(f"Row {row['row_index'] + 1}: location is structural.")
+                    item = StockItem(
+                        part=part, location=location, quantity=quantity,
+                        batch=str(mapped.get("stock.batch") or "").strip(),
+                        serial=str(mapped.get("stock.serial") or "").strip() or None,
+                        link=str(mapped.get("stock.link") or "").strip() or None,
+                        packaging=str(mapped.get("stock.packaging") or "").strip() or None,
+                    )
+                    if str(mapped.get("stock.status") or "").strip():
+                        item.status = int(str(mapped["stock.status"]).strip())
+                    if str(mapped.get("stock.purchase_price") or "").strip():
+                        item.purchase_price = Money(
+                            Decimal(str(mapped["stock.purchase_price"]).strip()),
+                            str(mapped.get("stock.price_currency") or "USD").strip().upper(),
+                        )
+                    item.full_clean()
+                    item.save(user=request.user, notes=str(mapped.get("stock.notes") or "").strip())
+                    StockImportRecord.objects.create(
+                        capture=capture, row_index=row["row_index"],
+                        stock_item_id=item.pk, created_by=request.user,
+                    )
+                    created.append({"row_index": row["row_index"], "stock_item_id": item.pk, "quantity": str(quantity)})
+                if created:
+                    _mark_inventory_write(capture, "stock")
+        except (ValueError, KeyError) as exc:
+            return Response({"detail": str(exc)}, status=400)
+        except Exception:
+            logger.exception("Stock import failed for capture_id=%s", capture.pk)
+            return Response({"detail": "Stock creation failed; the batch was rolled back."}, status=400)
+        return Response({"capture_id": capture.pk, "created_count": len(created), "created": created,
+                         "skipped_count": len(skipped), "skipped": skipped})
+
+
+class CaptureCleanupView(APIView):
+    """List and selectively delete only captures with no inventory writes."""
+
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        return Response({"captures": capture_cleanup_catalog()})
+
+    def post(self, request):
+        if request.data.get("confirm") is not True:
+            return Response({"detail": "Set confirm to true."}, status=400)
+        capture_ids = request.data.get("capture_ids")
+        if not isinstance(capture_ids, list) or not capture_ids:
+            return Response({"detail": "Select at least one capture."}, status=400)
+        try:
+            result = cleanup_selected(
+                capture_ids, action=str(request.data.get("action") or "")
+            )
+        except (TypeError, ValueError) as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(result)
+
+
+class CapturePinView(APIView):
+    """Pin or unpin a capture so scheduled cleanup cannot remove it."""
+
+    permission_classes = [permissions.IsAdminUser]
+
+    def post(self, request, pk):
+        if not isinstance(request.data.get("pinned"), bool):
+            return Response({"detail": "pinned must be a boolean."}, status=400)
+        capture = generics.get_object_or_404(CaptureImport, pk=pk)
+        capture.pinned = request.data["pinned"]
+        capture.save(update_fields=["pinned", "updated_at"])
+        return Response({"capture_id": capture.pk, "pinned": capture.pinned})
 
 
 class HealthView(generics.GenericAPIView):

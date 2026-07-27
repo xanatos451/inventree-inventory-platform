@@ -456,8 +456,26 @@ test("captures a McMaster single-item page directly", async () => {
         <li><a>Screws and Bolts</a></li><li><span aria-current="page">90126A029</span></li>
       </ul></nav>
       <h1>18-8 Stainless Steel Screw 90126A029, M2 x 0.4 mm Thread Size, 4 mm Long | McMaster-Carr</h1><p>General purpose screw.</p>
+      <img src="https://images1.mcmaster.com/init/gfx/MastheadLogo.svg" alt="McMaster-Carr Logo">
       <img src="/mvD/gfx/IndustrialInfo/industrial-information-icon.svg?ver=ImageNotFound" alt="Industrial information">
       <img src="/mvD/Contents/gfx/ImageCache/901/90126A029.png?ver=ImageNotFound" alt="Image of product">
+      <section id="lower-product-details">
+        <h2>Product Images</h2>
+        <picture>
+          <source srcset="
+            https://images1.mcmaster.com/mvD/Contents/gfx/medium/90126A029-side.png 640w,
+            https://images1.mcmaster.com/mvD/Contents/gfx/large/90126A029-side.png 1280w">
+          <img data-src="https://images1.mcmaster.com/mvD/Contents/gfx/small/90126A029-side.png"
+            alt="Side view product image">
+        </picture>
+        <a href="https://images1.mcmaster.com/mvD/Contents/gfx/large/90126A029-dimensions.png">
+          <img src="https://images1.mcmaster.com/mvD/Contents/gfx/medium/90126A029-dimensions.png"
+            alt="Dimensional drawing">
+        </a>
+        <div style="background-image:url('https://images1.mcmaster.com/mvD/Contents/gfx/large/90126A029-installed.jpg')"></div>
+        <img src="https://images1.mcmaster.com/init/gfx/home/BrowseCatalogCategoryImages/1x/Hardware-Catalog.png"
+          alt="Hardware">
+      </section>
       <table>
         <tr><th>For Screw Size</th><td>1/4 in.</td></tr><tr><th>Material</th><td>Steel</td></tr>
         <tr><th>Countersink Angle</th><td>90Â°</td></tr>
@@ -483,6 +501,14 @@ test("captures a McMaster single-item page directly", async () => {
   expect(capture.rows[0].Spec_U_S_Mexico_Canada_Agreement).toBe("Yes");
   expect(capture.rows[0].RowImageURL).toContain("/ImageCache/901/90126A029.png");
   expect(capture.rows[0].RowImageURL).not.toContain("ImageNotFound");
+  expect(capture.rows[0]["Image URL"]).toBe(capture.rows[0].RowImageURL);
+  expect(capture.rows[0]["Image Count"]).toBe(7);
+  expect(capture.rows[0]["Image URLs"]).toContain("/large/90126A029-side.png");
+  expect(capture.rows[0]["Image URLs"]).toContain("/large/90126A029-dimensions.png");
+  expect(capture.rows[0]["Image URLs"]).toContain("/large/90126A029-installed.jpg");
+  expect(capture.rows[0]["Image URLs"]).not.toContain("MastheadLogo");
+  expect(capture.rows[0]["Image URLs"]).not.toContain("Hardware-Catalog");
+  expect(capture.rows[0].ProductDetailImageURLs).toBe(capture.rows[0]["Image URLs"]);
   await supplier.close();
   await popup.close();
   await context.unroute("https://www.mcmaster.com/**");

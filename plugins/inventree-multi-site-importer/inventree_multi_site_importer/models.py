@@ -69,6 +69,9 @@ class CaptureImport(models.Model):
         related_name="supplier_captures_submitted",
     )
     error = models.TextField(blank=True)
+    inventory_written_at = models.DateTimeField(null=True, blank=True)
+    imported_stages = models.JSONField(default=list, blank=True)
+    pinned = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -123,6 +126,28 @@ class ImagePrefetch(models.Model):
 
     def __str__(self):
         return f"{self.capture_id}: {self.status} {self.url}"
+
+
+class StockImportRecord(models.Model):
+    """Idempotency ledger for explicitly confirmed stock creation."""
+
+    capture = models.ForeignKey(
+        CaptureImport, on_delete=models.CASCADE, related_name="stock_import_records"
+    )
+    row_index = models.PositiveIntegerField()
+    stock_item_id = models.PositiveBigIntegerField()
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = "inventree_multi_site_importer"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["capture", "row_index"], name="unique_capture_stock_row"
+            )
+        ]
 
 
 @receiver(post_delete, sender=ImagePrefetch)

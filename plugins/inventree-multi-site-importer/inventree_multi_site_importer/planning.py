@@ -3,12 +3,29 @@
 from __future__ import annotations
 
 from collections import Counter
+from decimal import Decimal, InvalidOperation
 import json
 from urllib.parse import urlparse
 
 
 def _text(value):
     return "" if value is None else str(value).strip()
+
+
+def _canonical_item(item):
+    item = dict(item or {})
+    aliases = {
+        "part_number": "part.ipn", "IPN": "part.ipn", "name": "part.name",
+        "description": "part.description", "category": "part.category",
+        "subcategory": "part.subcategory", "notes": "part.notes",
+        "image_url": "part.image_url", "image_urls": "part.image_urls",
+    }
+    for legacy, canonical in aliases.items():
+        if canonical not in item and legacy in item:
+            item[canonical] = item[legacy]
+        if legacy not in item and canonical in item:
+            item[legacy] = item[canonical]
+    return item
 
 
 def _parameters(item):
@@ -59,24 +76,44 @@ def _image_urls(value):
     return output
 
 
-def build_import_plan(items, part_lookup=None, supplier_lookup=None, category_lookup=None):
+def _call_lookup(lookup, *args):
+    try:
+        return list(lookup(*args) or [])
+    except TypeError:
+        return list(lookup(args[-1]) or [])
+
+
+def build_import_plan(
+    items, part_lookup=None, supplier_lookup=None, category_lookup=None,
+    manufacturer_lookup=None, company_lookup=None, location_lookup=None,
+):
     """Classify mapped rows without writing to InvenTree."""
     items = list(items or [])
     part_lookup = part_lookup or (lambda _identifier: [])
     supplier_lookup = supplier_lookup or (lambda _identifier: [])
-    identities = [_text(item.get("part_number") or item.get("IPN")).casefold() for item in items]
+    manufacturer_lookup = manufacturer_lookup or (lambda _company, _mpn: [])
+    company_lookup = company_lookup or (lambda _name, _role: [])
+    location_lookup = location_lookup or (lambda _path: [])
+    items = [_canonical_item(item) for item in items]
+    identities = [_text(item.get("part.ipn")).casefold() for item in items]
     duplicate_counts = Counter(identity for identity in identities if identity)
     rows = []
 
     for index, item in enumerate(items):
         item = dict(item or {})
         source_row_index = item.pop("_capture_row_index", index)
-        part_number = _text(item.get("part_number") or item.get("IPN"))
-        name = _text(item.get("name"))
-        category = _text(item.get("category"))
-        subcategory = _text(item.get("subcategory"))
-        image_url = _text(item.get("image_url"))
-        image_urls = _image_urls(item.get("image_urls"))
+        part_number = _text(item.get("part.ipn"))
+        name = _text(item.get("part.name"))
+        category = _text(item.get("part.category"))
+        subcategory = _text(item.get("part.subcategory"))
+        image_url = _text(item.get("part.image_url"))
+        image_urls = _image_urls(item.get("part.image_urls"))
+        supplier_name = _text(item.get("supplier.company"))
+        supplier_sku = _text(item.get("supplier.sku"))
+        manufacturer_name = _text(item.get("manufacturer.company"))
+        manufacturer_mpn = _text(item.get("manufacturer.mpn"))
+        stock_quantity = _text(item.get("stock.quantity"))
+        stock_location = _text(item.get("stock.location"))
         if image_url:
             image_urls = [image_url, *[url for url in image_urls if url != image_url]]
         elif image_urls:
@@ -87,6 +124,10 @@ def build_import_plan(items, part_lookup=None, supplier_lookup=None, category_lo
         warnings = []
         existing_parts = []
         existing_supplier_parts = []
+        existing_manufacturer_parts = []
+        supplier_companies = []
+        manufacturer_companies = []
+        stock_locations = []
         category_matches = []
         missing_category_segments = []
 
@@ -119,9 +160,45 @@ def build_import_plan(items, part_lookup=None, supplier_lookup=None, category_lo
 
         if part_number:
             existing_parts = list(part_lookup(part_number) or [])
-            existing_supplier_parts = list(supplier_lookup(part_number) or [])
+            # Legacy profiles historically used part_number as both IPN and SKU.
+            if not supplier_sku and "supplier.sku" not in item:
+                existing_supplier_parts = _call_lookup(supplier_lookup, "", part_number)
             if duplicate_counts[part_number.casefold()] > 1:
                 errors.append("Part number occurs more than once in this capture.")
+        if supplier_name or supplier_sku:
+            if not supplier_name or not supplier_sku:
+                errors.append("Supplier company and supplier SKU must be mapped together.")
+            else:
+                supplier_companies = _call_lookup(company_lookup, supplier_name, "supplier")
+                existing_supplier_parts = _call_lookup(
+                    supplier_lookup, supplier_name, supplier_sku
+                )
+                if len(supplier_companies) != 1:
+                    errors.append("Supplier company is missing or ambiguous.")
+        if manufacturer_name or manufacturer_mpn:
+            if not manufacturer_name or not manufacturer_mpn:
+                errors.append("Manufacturer company and MPN must be mapped together.")
+            else:
+                manufacturer_companies = _call_lookup(
+                    company_lookup, manufacturer_name, "manufacturer"
+                )
+                existing_manufacturer_parts = _call_lookup(
+                    manufacturer_lookup, manufacturer_name, manufacturer_mpn
+                )
+                if len(manufacturer_companies) != 1:
+                    errors.append("Manufacturer company is missing or ambiguous.")
+        if stock_quantity:
+            try:
+                if Decimal(stock_quantity) <= 0:
+                    errors.append("Stock quantity must be greater than zero.")
+            except InvalidOperation:
+                errors.append("Stock quantity must be numeric.")
+            if not stock_location:
+                errors.append("Stock location is required when stock quantity is mapped.")
+            else:
+                stock_locations = _call_lookup(location_lookup, stock_location)
+                if len(stock_locations) != 1:
+                    errors.append("Stock location is missing or ambiguous.")
 
         matched_part_ids = {match.get("pk") for match in existing_parts if match.get("pk") is not None}
         matched_part_ids.update(
@@ -157,6 +234,17 @@ def build_import_plan(items, part_lookup=None, supplier_lookup=None, category_lo
             "parameters": _parameters(item),
             "existing_parts": existing_parts,
             "existing_supplier_parts": existing_supplier_parts,
+            "existing_manufacturer_parts": existing_manufacturer_parts,
+            "supplier_companies": supplier_companies,
+            "manufacturer_companies": manufacturer_companies,
+            "stock_locations": stock_locations,
+            "supplier_action": (
+                "update" if existing_supplier_parts else "create"
+            ) if supplier_name and supplier_sku else "none",
+            "manufacturer_action": (
+                "update" if existing_manufacturer_parts else "create"
+            ) if manufacturer_name and manufacturer_mpn else "none",
+            "stock_action": "create-disabled" if stock_quantity else "none",
             "category_matches": category_matches,
             "missing_category_segments": missing_category_segments,
             "errors": errors,
