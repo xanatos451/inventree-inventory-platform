@@ -1,4 +1,5 @@
 import re
+import json
 
 from rest_framework import serializers
 
@@ -59,14 +60,55 @@ class CaptureImportSerializer(serializers.ModelSerializer):
     def validate_payload(self, payload):
         if not isinstance(payload, dict):
             raise serializers.ValidationError("Payload must be an object.")
+        max_payload_bytes = int(self.context.get("max_capture_payload_bytes", 8388608))
+        try:
+            payload_size = len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        except (TypeError, ValueError) as exc:
+            raise serializers.ValidationError("Payload contains unsupported JSON values.") from exc
+        if payload_size > max_payload_bytes:
+            raise serializers.ValidationError(
+                f"Payload exceeds the {max_payload_bytes} byte limit."
+            )
+
         rows = payload.get("rows")
         if not isinstance(rows, list) or not rows:
             raise serializers.ValidationError("Payload must contain a non-empty rows array.")
         if not all(isinstance(row, dict) for row in rows):
             raise serializers.ValidationError("Every captured row must be an object.")
+
         limit = int(self.context.get("max_capture_rows", 5000))
         if len(rows) > limit:
             raise serializers.ValidationError(f"Capture exceeds the {limit} row limit.")
+
+        max_row_fields = int(self.context.get("max_capture_row_fields", 500))
+        max_field_name_length = int(self.context.get("max_capture_field_name_length", 255))
+        max_cell_length = int(self.context.get("max_capture_cell_length", 32000))
+        for row_index, row in enumerate(rows, start=1):
+            if len(row) > max_row_fields:
+                raise serializers.ValidationError(
+                    f"Row {row_index} exceeds the {max_row_fields} field limit."
+                )
+            for field_name, value in row.items():
+                key = str(field_name or "").strip()
+                if not key:
+                    raise serializers.ValidationError(
+                        f"Row {row_index} contains an empty field name."
+                    )
+                if len(key) > max_field_name_length:
+                    raise serializers.ValidationError(
+                        f"Row {row_index} field '{key[:40]}' exceeds the {max_field_name_length} character name limit."
+                    )
+
+                if isinstance(value, (dict, list)):
+                    rendered = json.dumps(value, ensure_ascii=False)
+                elif value is None:
+                    rendered = ""
+                else:
+                    rendered = str(value)
+                if len(rendered) > max_cell_length:
+                    raise serializers.ValidationError(
+                        f"Row {row_index} field '{key}' exceeds the {max_cell_length} character value limit."
+                    )
         return payload
 
     def create(self, validated_data):

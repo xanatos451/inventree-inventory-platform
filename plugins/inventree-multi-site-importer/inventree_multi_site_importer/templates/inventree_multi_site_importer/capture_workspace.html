@@ -130,6 +130,7 @@
     <div class="actions">
       <button id="addParameterBtn" class="secondary" type="button">Add Parameter Mapping</button>
       <button id="addCustomBtn" class="secondary" type="button">Add Custom Target</button>
+      <button id="applySuggestedProfileBtn" class="secondary" type="button">Apply Suggested Template</button>
       <button id="previewBtn" type="button">Preview Mapping</button>
       <button id="buildPlanBtn" type="button">Build Import Plan</button>
       <button id="saveProfileBtn" type="button">Save Profile</button>
@@ -267,6 +268,198 @@
         subcategory:"part.subcategory", notes:"part.notes",
         image_url:"part.image_url", image_urls:"part.image_urls"
       };
+      const suggestedProfileTemplates = {
+        "mcmaster-carr|single-item|product-detail": {
+          "part.ipn": {source_field:"McMasterPartNumber", regex:""},
+          "part.name": {source_field:"ProductDetailPageTitle", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "part.category": {source_field:"ProductDetailBreadcrumbs", regex:"^([^>]+)"},
+          "part.subcategory": {source_field:"ProductDetailBreadcrumbs", regex:"^[^>]+ > (.+)$"},
+          "part.notes": {source_field:"ProductDetailNotes", regex:""},
+          "part.image_url": {source_field:"Image URL", regex:""},
+          "part.image_urls": {source_field:"Image URLs", regex:""},
+          "supplier.company": {template:"McMaster-Carr", regex:""},
+          "supplier.sku": {source_field:"McMasterPartNumber", regex:""},
+          "supplier.description": {source_field:"ProductDetailPageTitle", regex:""},
+          "supplier.link": {source_field:"ProductURL", regex:""},
+          "manufacturer.company": {template:"McMaster-Carr", regex:""},
+          "manufacturer.mpn": {source_field:"McMasterPartNumber", regex:""},
+          "parameter.Thread Size": {source_field:"ProductDetailThreadSize", regex:""},
+          "parameter.Length": {source_field:"ProductDetailLength", regex:""},
+          "parameter.Material": {source_field:"Spec_Material", regex:""},
+          "parameter.Canonical Type": {template:"Socket Head Cap Screw", regex:""},
+          "parameter.Canonical Size": {source_field:"ProductDetailVariant", regex:""},
+          "parameter.Canonical Material": {source_field:"Spec_Material", regex:""},
+          "parameter.Canonical Drive": {template:"Hex Socket", regex:""},
+          "parameter.Canonical Fingerprint": {template:"Socket Head Cap Screw|{ProductDetailVariant}|{Spec_Material}|Hex Socket", regex:""}
+        },
+        "mcmaster-carr|list-details|category-table": {
+          "part.ipn": {source_field:"McMasterPartNumber", regex:""},
+          "part.name": {source_field:"Product", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "part.category": {source_field:"ProductListBreadcrumbs", regex:"^([^>]+)"},
+          "part.subcategory": {source_field:"ProductListBreadcrumbs", regex:"^[^>]+ > (.+)$"},
+          "part.image_url": {source_field:"Image URL", regex:""},
+          "part.image_urls": {source_field:"Image URLs", regex:""},
+          "supplier.company": {template:"McMaster-Carr", regex:""},
+          "supplier.sku": {source_field:"McMasterPartNumber", regex:""},
+          "supplier.description": {source_field:"Product", regex:""},
+          "supplier.link": {source_field:"ProductURL", regex:""},
+          "manufacturer.company": {template:"McMaster-Carr", regex:""},
+          "manufacturer.mpn": {source_field:"McMasterPartNumber", regex:""},
+          "parameter.Thread Size": {source_field:"Thread", regex:""},
+          "parameter.Length": {source_field:"Length", regex:""},
+          "parameter.Material": {source_field:"Material", regex:""},
+          "parameter.Canonical Type": {template:"Socket Head Cap Screw", regex:""},
+          "parameter.Canonical Size": {template:"{Thread} x {Length}", regex:""},
+          "parameter.Canonical Material": {source_field:"Material", regex:""},
+          "parameter.Canonical Drive": {template:"Hex Socket", regex:""},
+          "parameter.Canonical Fingerprint": {template:"Socket Head Cap Screw|{Thread} x {Length}|{Material}|Hex Socket", regex:""}
+        },
+        "boltdepot|single-item|product-detail": {
+          "part.ipn": {source_field:"BoltDepotPartNumber", regex:""},
+          "part.name": {source_field:"ProductDetailPageTitle", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "part.category": {source_field:"ProductDetailBreadcrumbs", regex:"^([^>]+)"},
+          "part.subcategory": {source_field:"ProductDetailBreadcrumbs", regex:"^[^>]+ > (.+)$"},
+          "part.notes": {source_field:"ProductDetailSpecs", regex:""},
+          "part.image_url": {source_field:"RowImageURL", regex:""},
+          "supplier.company": {template:"Bolt Depot", regex:""},
+          "supplier.sku": {source_field:"BoltDepotPartNumber", regex:""},
+          "supplier.description": {source_field:"ProductDetailPageTitle", regex:""},
+          "supplier.link": {source_field:"ProductURL", regex:""},
+          "parameter.Canonical Type": {source_field:"ProductDetailPageTitle", regex:""},
+          "parameter.Canonical Size": {template:"{Spec_Thread_Size} x {Spec_Length}", regex:""},
+          "parameter.Canonical Material": {source_field:"Spec_Material", regex:""},
+          "parameter.Canonical Fingerprint": {template:"{ProductDetailPageTitle}|{Spec_Thread_Size} x {Spec_Length}|{Spec_Material}", regex:""}
+        },
+        "boltdepot|list-details|catalog-table": {
+          "part.ipn": {source_field:"BoltDepotPartNumber", regex:""},
+          "part.name": {source_field:"Product", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "part.category": {source_field:"ProductListBreadcrumbs", regex:"^([^>]+)"},
+          "part.subcategory": {source_field:"ProductListBreadcrumbs", regex:"^[^>]+ > (.+)$"},
+          "part.image_url": {source_field:"RowImageURL", regex:""},
+          "supplier.company": {template:"Bolt Depot", regex:""},
+          "supplier.sku": {source_field:"BoltDepotPartNumber", regex:""},
+          "supplier.description": {source_field:"Product", regex:""},
+          "supplier.link": {source_field:"ProductURL", regex:""},
+          "parameter.Canonical Type": {source_field:"Product", regex:""},
+          "parameter.Canonical Size": {template:"{Thread} x {Length}", regex:""},
+          "parameter.Canonical Material": {source_field:"Material", regex:""},
+          "parameter.Canonical Fingerprint": {template:"{Product}|{Thread} x {Length}|{Material}", regex:""}
+        },
+        "boltdepot|list-details|order-details": {
+          "part.ipn": {source_field:"BoltDepotPartNumber", regex:""},
+          "part.name": {source_field:"Product", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "supplier.company": {template:"Bolt Depot", regex:""},
+          "supplier.sku": {source_field:"BoltDepotPartNumber", regex:""},
+          "supplier.description": {source_field:"Description", regex:""},
+          "supplier.link": {source_field:"ProductURL", regex:""},
+          "stock.quantity": {source_field:"Quantity", regex:""},
+          "stock.link": {source_field:"SourcePageURL", regex:""},
+          "parameter.Canonical Type": {source_field:"Product", regex:""},
+          "parameter.Canonical Fingerprint": {template:"{Product}|{BoltDepotPartNumber}", regex:""}
+        },
+        "amazon|single-item|product-detail": {
+          "part.ipn": {source_field:"Manufacturer Part Number", regex:""},
+          "part.name": {source_field:"Product Name", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "part.category": {source_field:"Category", regex:"^([^>]+)"},
+          "part.subcategory": {source_field:"Category", regex:"^[^>]+ > (.+)$"},
+          "part.notes": {source_field:"About This Item", regex:""},
+          "part.image_url": {source_field:"Image URL", regex:""},
+          "part.image_urls": {source_field:"Image URLs", regex:""},
+          "supplier.company": {source_field:"Sold By", regex:""},
+          "supplier.sku": {source_field:"ASIN", regex:""},
+          "supplier.description": {source_field:"Product Name", regex:""},
+          "supplier.link": {source_field:"Product URL", regex:""},
+          "supplier.price": {source_field:"Price", regex:"([0-9]+(?:\\.[0-9]+)?)"},
+          "supplier.price_currency": {source_field:"Price Currency", regex:""},
+          "manufacturer.company": {source_field:"Manufacturer", regex:""},
+          "manufacturer.mpn": {source_field:"Manufacturer Part Number", regex:""},
+          "parameter.Brand": {source_field:"Brand", regex:""},
+          "parameter.Model Number": {source_field:"Model Number", regex:""},
+          "parameter.Canonical Type": {source_field:"Product Name", regex:""},
+          "parameter.Canonical Size": {source_field:"Selected Variations", regex:""},
+          "parameter.Canonical Material": {source_field:"Material", regex:""},
+          "parameter.Canonical Fingerprint": {template:"{Product Name}|{Selected Variations}|{Brand}|{Manufacturer Part Number}", regex:""}
+        },
+        "amazon|list-details|order-items": {
+          "part.ipn": {source_field:"Manufacturer Part Number", regex:""},
+          "part.name": {source_field:"Product Name", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "part.category": {source_field:"Category", regex:"^([^>]+)"},
+          "part.subcategory": {source_field:"Category", regex:"^[^>]+ > (.+)$"},
+          "part.image_url": {source_field:"Image URL", regex:""},
+          "supplier.company": {source_field:"Sold By", regex:""},
+          "supplier.sku": {source_field:"ASIN", regex:""},
+          "supplier.description": {source_field:"Product Name", regex:""},
+          "supplier.link": {source_field:"Product URL", regex:""},
+          "parameter.Canonical Type": {source_field:"Product Name", regex:""},
+          "parameter.Canonical Size": {source_field:"Selected Variations", regex:""},
+          "parameter.Canonical Fingerprint": {template:"{Product Name}|{Selected Variations}|{Brand}|{ASIN}", regex:""}
+        },
+        "fastenal|single-item|product-detail": {
+          "part.ipn": {source_field:"FastenalPartNumber", regex:""},
+          "part.name": {source_field:"ProductDetailPageTitle", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "part.category": {source_field:"ProductDetailBreadcrumbs", regex:"^([^>]+)"},
+          "part.subcategory": {source_field:"ProductDetailBreadcrumbs", regex:"^[^>]+ > (.+)$"},
+          "part.notes": {source_field:"ProductDetailSpecs", regex:""},
+          "part.image_url": {source_field:"Image URL", regex:""},
+          "part.image_urls": {source_field:"Image URLs", regex:""},
+          "supplier.company": {template:"Fastenal", regex:""},
+          "supplier.sku": {source_field:"FastenalPartNumber", regex:""},
+          "supplier.description": {source_field:"ProductDetailPageTitle", regex:""},
+          "supplier.link": {source_field:"ProductURL", regex:""},
+          "manufacturer.company": {template:"Fastenal", regex:""},
+          "manufacturer.mpn": {source_field:"FastenalPartNumber", regex:""},
+          "parameter.Thread Size": {source_field:"Spec_Thread_Size", regex:""},
+          "parameter.Length": {source_field:"Spec_Length", regex:""},
+          "parameter.Material": {source_field:"Spec_Material", regex:""},
+          "parameter.Canonical Type": {source_field:"ProductDetailPageTitle", regex:""},
+          "parameter.Canonical Size": {template:"{Spec_Thread_Size} x {Spec_Length}", regex:""},
+          "parameter.Canonical Material": {source_field:"Spec_Material", regex:""},
+          "parameter.Canonical Drive": {template:"Hex Socket", regex:""},
+          "parameter.Canonical Fingerprint": {template:"{ProductDetailPageTitle}|{Spec_Thread_Size} x {Spec_Length}|{Spec_Material}|Hex Socket", regex:""}
+        },
+        "fastenal|list-details|catalog-list": {
+          "part.ipn": {source_field:"FastenalPartNumber", regex:""},
+          "part.name": {source_field:"Product", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "part.category": {source_field:"ProductListBreadcrumbs", regex:"^([^>]+)"},
+          "part.subcategory": {source_field:"ProductListBreadcrumbs", regex:"^[^>]+ > (.+)$"},
+          "part.image_url": {source_field:"RowImageURL", regex:""},
+          "supplier.company": {template:"Fastenal", regex:""},
+          "supplier.sku": {source_field:"FastenalPartNumber", regex:""},
+          "supplier.description": {source_field:"Product", regex:""},
+          "supplier.link": {source_field:"ProductURL", regex:""},
+          "manufacturer.company": {template:"Fastenal", regex:""},
+          "manufacturer.mpn": {source_field:"FastenalPartNumber", regex:""},
+          "parameter.Canonical Type": {source_field:"Product", regex:""},
+          "parameter.Canonical Fingerprint": {template:"{Product}|{FastenalPartNumber}", regex:""}
+        }
+      };
+
+      function normalizeTemplateScopeValue(value) {
+        return String(value || "").trim().toLowerCase();
+      }
+
+      function suggestedTemplateRules() {
+        const src = normalizeTemplateScopeValue(source);
+        const profile = normalizeTemplateScopeValue(captureProfile);
+        const page = normalizeTemplateScopeValue(pageType);
+        const exact = `${src}|${profile}|${page}`;
+        if (suggestedProfileTemplates[exact]) return suggestedProfileTemplates[exact];
+        const profileWildcard = `${src}|${profile}|*`;
+        if (suggestedProfileTemplates[profileWildcard]) return suggestedProfileTemplates[profileWildcard];
+        const pageWildcard = `${src}|*|${page}`;
+        if (suggestedProfileTemplates[pageWildcard]) return suggestedProfileTemplates[pageWildcard];
+        const sourceWildcard = `${src}|*|*`;
+        return suggestedProfileTemplates[sourceWildcard] || null;
+      }
       let selectedProfileId = null;
       let profiles = [];
       let lastPlan = null;
@@ -568,6 +761,25 @@
             template:rule.template || "", regex:rule.regex || "", removable:true, parameter
           }));
         }
+      }
+
+      function applySuggestedTemplate() {
+        const rules = suggestedTemplateRules();
+        if (!rules) {
+          throw new Error(
+            `No suggested template is available for ${source} / ${captureProfile} / ${pageType}.`
+          );
+        }
+        const hasExistingRules = Object.keys(collectRules()).length > 0;
+        if (hasExistingRules && !confirm("Replace current mapping rules with the suggested template for this capture scope?")) {
+          return;
+        }
+        applyRules(rules);
+        setStatus(
+          `Applied suggested template for ${source} / ${captureProfile} / ${pageType}. ` +
+          "Review canonical fingerprint fields before saving.",
+          "ok"
+        );
       }
 
       function profilePayload() {
@@ -1036,6 +1248,13 @@
       $("previousDatasetPageBtn").addEventListener("click", () => loadDatasetPage(datasetOffset - datasetPageSize));
       $("nextDatasetPageBtn").addEventListener("click", () => loadDatasetPage(datasetOffset + datasetPageSize));
       $("addCustomBtn").addEventListener("click", () => $("parameterRules").append(createRuleRow({removable:true})));
+      $("applySuggestedProfileBtn").addEventListener("click", () => {
+        try {
+          applySuggestedTemplate();
+        } catch (error) {
+          setStatus(error.message, "error");
+        }
+      });
       $("previewBtn").addEventListener("click", () => preview().catch((error) => setStatus(error.message, "error")));
       $("buildPlanBtn").addEventListener("click", () => buildPlan().catch((error) => setStatus(error.message, "error")));
       $("createCategoriesBtn").addEventListener("click", () => createMissingCategories().catch((error) => setStatus(error.message, "error")));

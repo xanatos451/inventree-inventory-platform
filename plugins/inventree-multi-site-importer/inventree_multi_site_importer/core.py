@@ -35,6 +35,12 @@ class MultiSiteImporterPlugin(
             "default": 5000,
             "validator": int,
         },
+        "MAX_CAPTURE_PAYLOAD_BYTES": {
+            "name": "Maximum capture payload size",
+            "description": "Reject captures whose payload JSON exceeds this byte size.",
+            "default": 8388608,
+            "validator": int,
+        },
         "MAX_IMAGE_DOWNLOAD_BYTES": {
             "name": "Maximum remote image size",
             "description": "Maximum bytes downloaded for each product image.",

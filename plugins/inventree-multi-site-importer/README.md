@@ -2,7 +2,7 @@
 
 Server-side companion to the [Multi-Site Inventory Capture Chrome extension](../../extensions/chrome-multi-site-inventree-export/README.md). The extension reads supplier pages; this plugin stores raw captures, exposes field-inspection and mapping tools, and provides the boundary for future inventory writes.
 
-> Current scope: version `0.2.1` queues captures, provides paged dataset selection and namespaced visual mapping, creates parts, imports supplier and manufacturer records in a separate stage, optionally creates idempotent stock items, validates and caches remote images before import, batches detail writes, provides selective retention cleanup, and provides a responsive Part image gallery.
+> Current scope: version `0.2.2` queues captures, provides paged dataset selection and namespaced visual mapping, creates parts, imports supplier and manufacturer records in a separate stage, optionally creates idempotent stock items, validates and caches remote images before import, batches detail writes, provides selective retention cleanup, and provides a responsive Part image gallery.
 
 ## Requirements
 
@@ -55,7 +55,7 @@ Omit `--clean` to retain existing artifacts. The script only permits output belo
 The distributable artifact is created under the consolidated repository output directory:
 
 ```text
-.artifacts/plugin/inventree_multi_site_importer-0.2.1-py3-none-any.whl
+.artifacts/plugin/inventree_multi_site_importer-0.2.2-py3-none-any.whl
 ```
 
 Before distributing it, run:
@@ -110,7 +110,7 @@ Finally restart both the InvenTree web server and background worker. InvenTree d
 Copy the wheel to a persistent path that is visible inside the InvenTree server and worker environments. Add a PEP 508 file requirement to `plugins.txt`:
 
 ```text
-inventree-multi-site-importer @ file:///absolute/path/visible/to/inventree_multi_site_importer-0.2.1-py3-none-any.whl
+inventree-multi-site-importer @ file:///absolute/path/visible/to/inventree_multi_site_importer-0.2.2-py3-none-any.whl
 ```
 
 For Docker, the wheel must be placed in a bind-mounted or persistent data path and the path in `plugins.txt` must be the path **inside the container**, not the host-only path. Run `invoke plugins`, the normal update/migration process, and restart the server and worker.
@@ -362,6 +362,8 @@ Recommended starting policy:
 
 Version `0.1.19` canonicalizes the previously server-generated `0003_alter_captureimport_id_alter_mappingprofile_id` migration and places the image manifest in `0004_imageprefetch`. This keeps upgrades linear on installations where InvenTree had already generated the primary-key migration locally.
 
+Version `0.2.2` similarly canonicalizes the server-generated `0005_alter_captureimport_id_alter_imageprefetch_id_and_more` migration. The package retains both legitimate `0005` branches—generated ID normalization and stock provenance—then joins them in `0007_merge_0005_generated_0006_capture_retention`. Plugin model IDs are explicitly declared as `AutoField`, matching the field type selected by the supported InvenTree runtime and preventing another generated ID migration. Do not run `makemigrations --merge` manually for this historical conflict; install `0.2.2` and let the packaged merge migration converge the graph.
+
 ## View product images
 
 Version `0.1.20` adds a **Product Images** panel to browser Part pages. It presents the primary image and image-file attachments in a responsive thumbnail grid. Select a thumbnail to open the full-size file, follow the original supplier URL when the importer recorded one, press Escape or select the backdrop to close the viewer, and use **Reload** after attachments change. The panel follows InvenTree's active light or dark theme and can be disabled with the plugin's **Enable part image gallery** setting.
@@ -467,6 +469,10 @@ All routes require normal InvenTree authentication and are mounted under:
 | `GET`, `POST` | `captures/{id}/images/prefetch/` | Inspect or batch-download the capture image prefetch manifest |
 | `POST` | `captures/{id}/images/exclude-failures/` | Explicitly exclude failed prefetched URLs (`confirm: true` required) |
 | `GET` | `captures/{id}/rows/` | Read a paged slice of immutable dataset rows for import selection |
+
+## AI assistant roadmap
+
+See [AI_ASSISTANT_MVP.md](AI_ASSISTANT_MVP.md) for the phased plan and contracts for an advisory AI assistant that helps mapping quality and cross-supplier matching while keeping writes human-approved.
 | `GET`, `POST` | `mapping-profiles/` | List or create mapping profiles |
 | `GET`, `PATCH`, `PUT`, `DELETE` | `mapping-profiles/{id}/` | Retrieve, edit, or delete one mapping profile |
 

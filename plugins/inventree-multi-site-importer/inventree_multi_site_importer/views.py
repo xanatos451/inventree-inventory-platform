@@ -17,9 +17,30 @@ from .inspection import display_value, field_catalog, inspect_field, ordered_fie
 from .serializers import CaptureImportSerializer, MappingProfileSerializer
 from .selection import select_capture_rows
 from .remote_images import RemoteImageError, download_remote_image
+from .ai_assistant import build_candidate_matches, normalize_captured_row
 
 
 logger = logging.getLogger(__name__)
+
+
+def _capture_queryset_for_request(request):
+    """Return captures visible to the caller.
+
+    Staff users can inspect all captures. Non-staff users are limited to captures
+    they submitted, preventing cross-account access to supplier datasets.
+    """
+    queryset = CaptureImport.objects.select_related("profile", "submitted_by")
+    user = getattr(request, "user", None)
+    if user and getattr(user, "is_staff", False):
+        return queryset
+    if user and getattr(user, "is_authenticated", False):
+        return queryset.filter(submitted_by=user)
+    return queryset.none()
+
+
+def _capture_or_404(request, pk):
+    """Resolve a capture within the caller's visibility scope."""
+    return generics.get_object_or_404(_capture_queryset_for_request(request), pk=pk)
 
 
 def _mark_inventory_write(capture, stage):
@@ -142,6 +163,70 @@ def _mapped_capture_items(capture, rules, request_data):
     return items
 
 
+def _normalized_capture_items(capture, rules, request_data):
+    """Return normalized rows, with mapped values when rules are provided."""
+    pairs = select_capture_rows(
+        capture.payload.get("rows", []),
+        request_data.get("selected_row_indices"),
+    )
+    items = []
+    for row_index, row in pairs:
+        mapped = map_row(row, rules) if isinstance(rules, dict) and rules else {}
+        items.append(
+            normalize_captured_row(
+                raw_row=row,
+                mapped_item=mapped,
+                source=capture.source,
+                capture_id=capture.pk,
+                row_index=row_index,
+            )
+        )
+    return items
+
+
+def _candidate_parts_for_item(item, limit=120):
+    """Fetch candidate existing parts for one normalized capture item."""
+    try:
+        from django.db.models import Q
+        from part.models import Part
+    except Exception:
+        logger.exception("Could not import InvenTree Part models for candidates")
+        raise
+
+    identity = item.get("identity") or {}
+    canonical = item.get("canonical") or {}
+
+    incoming_ipn = str(identity.get("part_ipn") or "").strip()
+    if incoming_ipn:
+        queryset = Part.objects.filter(IPN__iexact=incoming_ipn)
+        exact = list(queryset.values("pk", "IPN", "name", "description")[: max(1, int(limit))])
+        if exact:
+            return exact
+
+    token_values = [
+        str(identity.get("product_name") or "").strip(),
+        str(identity.get("description") or "").strip(),
+        str(canonical.get("type") or "").strip(),
+        str(canonical.get("thread") or "").strip(),
+        str(canonical.get("material") or "").strip(),
+    ]
+    query = Q()
+    for value in token_values:
+        if not value:
+            continue
+        token = value[:80]
+        query |= Q(name__icontains=token)
+        query |= Q(description__icontains=token)
+        query |= Q(IPN__icontains=token)
+
+    if not query:
+        queryset = Part.objects.all()
+    else:
+        queryset = Part.objects.filter(query)
+
+    return list(queryset.values("pk", "IPN", "name", "description")[: max(1, int(limit))])
+
+
 def _build_live_import_plan(mapped_items, lock_parts=False):
     """Build a plan from current database state, optionally locking matches."""
     from company.models import Company, ManufacturerPart, SupplierPart
@@ -238,12 +323,22 @@ class CaptureListCreateView(generics.ListCreateAPIView):
     serializer_class = CaptureImportSerializer
 
     def get_queryset(self):
-        return CaptureImport.objects.select_related("profile", "submitted_by")
+        return _capture_queryset_for_request(self.request)
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
         plugin = getattr(self.request, "plugin", None)
-        context["max_capture_rows"] = plugin.get_setting("MAX_CAPTURE_ROWS") if plugin else 5000
+        if plugin:
+            max_rows = int(plugin.get_setting("MAX_CAPTURE_ROWS") or 5000)
+            max_payload_bytes = int(plugin.get_setting("MAX_CAPTURE_PAYLOAD_BYTES") or 8388608)
+        else:
+            max_rows = 5000
+            max_payload_bytes = 8388608
+        context["max_capture_rows"] = max_rows
+        context["max_capture_payload_bytes"] = max_payload_bytes
+        context["max_capture_row_fields"] = 500
+        context["max_capture_field_name_length"] = 255
+        context["max_capture_cell_length"] = 32000
         return context
 
     def create(self, request, *args, **kwargs):
@@ -260,7 +355,9 @@ class CaptureListCreateView(generics.ListCreateAPIView):
 class CaptureDetailView(generics.RetrieveAPIView):
     permission_classes = [permissions.IsAuthenticated]
     serializer_class = CaptureImportSerializer
-    queryset = CaptureImport.objects.select_related("profile", "submitted_by")
+
+    def get_queryset(self):
+        return _capture_queryset_for_request(self.request)
 
 
 class MappingProfileListCreateView(generics.ListCreateAPIView):
@@ -292,7 +389,7 @@ class MappingPreviewView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, pk):
-        capture = generics.get_object_or_404(CaptureImport, pk=pk)
+        capture = _capture_or_404(request, pk)
         profile_id = request.data.get("profile") or capture.profile_id
         rules = request.data.get("rules")
         profile = None
@@ -318,13 +415,107 @@ class MappingPreviewView(APIView):
         })
 
 
+class CaptureNormalizeView(APIView):
+    """Return deterministic canonical normalization for selected capture rows."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        capture = _capture_or_404(request, pk)
+        profile_id = request.data.get("profile") or capture.profile_id
+        rules = request.data.get("rules")
+        profile = None
+        if profile_id:
+            profile = generics.get_object_or_404(
+                MappingProfile,
+                pk=profile_id,
+                is_active=True,
+            )
+            rules = profile.rules
+
+        try:
+            items = _normalized_capture_items(capture, rules, request.data)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            {
+                "capture_id": capture.pk,
+                "profile_id": profile.pk if profile else None,
+                "row_count": len(items),
+                "items": items,
+            }
+        )
+
+
+class CaptureCandidatesView(APIView):
+    """Return deterministic likely existing-part candidates for selected rows."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        capture = _capture_or_404(request, pk)
+        profile_id = request.data.get("profile") or capture.profile_id
+        rules = request.data.get("rules")
+        profile = None
+        if profile_id:
+            profile = generics.get_object_or_404(
+                MappingProfile,
+                pk=profile_id,
+                is_active=True,
+            )
+            rules = profile.rules
+
+        try:
+            items = _normalized_capture_items(capture, rules, request.data)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            limit = max(1, min(20, int(request.data.get("limit") or 5)))
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "limit must be an integer between 1 and 20."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        results = []
+        for item in items:
+            try:
+                candidates = _candidate_parts_for_item(item)
+            except Exception:
+                return Response(
+                    {"detail": "Could not query existing InvenTree parts for candidate matching."},
+                    status=status.HTTP_503_SERVICE_UNAVAILABLE,
+                )
+            matches = build_candidate_matches(item, candidates, limit=limit)
+            results.append(
+                {
+                    "capture_id": item.get("capture_id"),
+                    "row_index": item.get("row_index"),
+                    "canonical": item.get("canonical") or {},
+                    "identity": item.get("identity") or {},
+                    "candidates": matches,
+                }
+            )
+
+        return Response(
+            {
+                "capture_id": capture.pk,
+                "profile_id": profile.pk if profile else None,
+                "row_count": len(results),
+                "items": results,
+            }
+        )
+
+
 class ImportPlanView(APIView):
     """Build a read-only plan against current InvenTree part identifiers."""
 
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, pk):
-        capture = generics.get_object_or_404(CaptureImport, pk=pk)
+        capture = _capture_or_404(request, pk)
         profile_id = request.data.get("profile") or capture.profile_id
         rules = request.data.get("rules")
         profile = None
@@ -390,7 +581,7 @@ class CreateCapturePartsView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        capture = generics.get_object_or_404(CaptureImport, pk=pk)
+        capture = _capture_or_404(request, pk)
         profile_id = request.data.get("profile") or capture.profile_id
         rules = request.data.get("rules")
         profile = None
@@ -521,7 +712,7 @@ class ImportCapturePartDetailsView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        capture = generics.get_object_or_404(CaptureImport, pk=pk)
+        capture = _capture_or_404(request, pk)
         profile_id = request.data.get("profile") or capture.profile_id
         rules = request.data.get("rules")
         if profile_id:
@@ -827,7 +1018,7 @@ class CaptureImagePrefetchView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, pk):
-        capture = generics.get_object_or_404(CaptureImport, pk=pk)
+        capture = _capture_or_404(request, pk)
         items = list(
             capture.image_prefetches.values(
                 "url",
@@ -855,7 +1046,7 @@ class CaptureImagePrefetchView(APIView):
                 {"detail": "Set confirm to true to prefetch images."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        capture = generics.get_object_or_404(CaptureImport, pk=pk)
+        capture = _capture_or_404(request, pk)
         urls = request.data.get("image_urls")
         if not isinstance(urls, list) or not urls:
             return Response(
@@ -975,7 +1166,7 @@ class ExcludeCapturePrefetchFailuresView(APIView):
                 {"detail": "Set confirm to true to exclude failed images."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        capture = generics.get_object_or_404(CaptureImport, pk=pk)
+        capture = _capture_or_404(request, pk)
         urls = request.data.get("image_urls")
         if not isinstance(urls, list):
             return Response(
@@ -1025,7 +1216,7 @@ class CreateCaptureCategoriesView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        capture = generics.get_object_or_404(CaptureImport, pk=pk)
+        capture = _capture_or_404(request, pk)
         profile_id = request.data.get("profile") or capture.profile_id
         rules = request.data.get("rules")
         if profile_id:
@@ -1111,7 +1302,7 @@ class CaptureFieldInspectionView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, pk):
-        capture = generics.get_object_or_404(CaptureImport, pk=pk)
+        capture = _capture_or_404(request, pk)
         rows = capture.payload.get("rows", [])
         headers = capture.payload.get("headers", [])
         selected_field = str(request.query_params.get("field", "")).strip()
@@ -1149,7 +1340,7 @@ class CaptureDatasetRowsView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, pk):
-        capture = generics.get_object_or_404(CaptureImport, pk=pk)
+        capture = _capture_or_404(request, pk)
         rows = capture.payload.get("rows", [])
         try:
             offset = max(0, int(request.query_params.get("offset", 0)))
@@ -1178,7 +1369,7 @@ class CaptureWorkspaceView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def get(self, request, pk):
-        capture = generics.get_object_or_404(CaptureImport, pk=pk)
+        capture = _capture_or_404(request, pk)
         rows = capture.payload.get("rows", [])
         headers = capture.payload.get("headers", [])
         fields = field_catalog(rows, headers)
@@ -1244,7 +1435,7 @@ class ImportCaptureProcurementView(APIView):
         from djmoney.money import Money
         from part.models import Part
         from users.permissions import check_user_permission
-        capture = generics.get_object_or_404(CaptureImport, pk=pk)
+        capture = _capture_or_404(request, pk)
         counts = {"manufacturer_created": 0, "manufacturer_updated": 0,
                   "supplier_created": 0, "supplier_updated": 0}
         try:
@@ -1351,7 +1542,7 @@ class CreateCaptureStockView(APIView):
         from users.permissions import check_user_permission
         if not check_user_permission(request.user, StockItem, "add"):
             return Response({"detail": "Stock Item add permission is required."}, status=403)
-        capture = generics.get_object_or_404(CaptureImport, pk=pk)
+        capture = _capture_or_404(request, pk)
         created, skipped = [], []
         try:
             plan = _build_live_import_plan(_workflow_items(request, capture))
@@ -1439,7 +1630,7 @@ class CapturePinView(APIView):
     def post(self, request, pk):
         if not isinstance(request.data.get("pinned"), bool):
             return Response({"detail": "pinned must be a boolean."}, status=400)
-        capture = generics.get_object_or_404(CaptureImport, pk=pk)
+        capture = _capture_or_404(request, pk)
         capture.pinned = request.data["pinned"]
         capture.save(update_fields=["pinned", "updated_at"])
         return Response({"capture_id": capture.pk, "pinned": capture.pinned})
@@ -1450,3 +1641,4 @@ class HealthView(generics.GenericAPIView):
 
     def get(self, request):
         return Response({"ok": True, "contract_version": "1.0"})
+

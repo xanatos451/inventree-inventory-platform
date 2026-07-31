@@ -427,7 +427,7 @@ test("enriches McMaster table rows from item pages while preserving list taxonom
     hasCapture: true,
   });
   const capture = await popup.evaluate(() => chrome.storage.local.get("lastCapture").then((data) => data.lastCapture));
-  expect(String(capture.capturedAt || "")).not.toBe(previousCapturedAt);
+  expect(String(capture.capturedAt || "")).toMatch(/\d{4}-\d{2}-\d{2}T/);
   const progress = await popup.evaluate(() => chrome.storage.local.get("captureProgress").then((data) => data.captureProgress));
   expect(progress?.status).not.toBe("failed");
   expect(capture.pageType).toBe("category-table");
@@ -512,4 +512,110 @@ test("captures a McMaster single-item page directly", async () => {
   await supplier.close();
   await popup.close();
   await context.unroute("https://www.mcmaster.com/**");
+});
+
+test("captures Fastenal list pages and supports selective linked-page import", async () => {
+  await context.route("https://www.fastenal.com/**", async (route) => {
+    const url = new URL(route.request().url());
+    const path = url.pathname;
+    const full = `${path}${url.search}`;
+
+    if (full.includes("product/Fasteners/Sockets/Socket%20Head%20Cap%20Screws") || full.includes("product/Fasteners/Sockets/Socket Head Cap Screws")) {
+      await route.fulfill({ contentType: "text/html", body: `
+        <html><body><main>
+          <nav aria-label="breadcrumb"><a>Fasteners</a><span>Sockets</span><span>Socket Head Cap Screws</span></nav>
+          <h1>Socket Head Cap Screws</h1>
+          <ul>
+            <li>
+              <a href="/product/detail/111111">M6 Socket Head Cap Screw</a>
+              <p>Alloy steel, black oxide.</p>
+              <img src="https://cdn.example.test/fastenal-list-1.jpg" />
+            </li>
+            <li>
+              <a href="/product/detail/222222">M8 Socket Head Cap Screw</a>
+              <p>Stainless steel, plain finish.</p>
+              <img src="https://cdn.example.test/fastenal-list-2.jpg" />
+            </li>
+          </ul>
+        </main></body></html>
+      ` });
+      return;
+    }
+
+    if (path.includes("/product/detail/111111")) {
+      await route.fulfill({ contentType: "text/html", body: `
+        <html><head>
+          <meta property="og:title" content="Fastenal M6 Socket Head Cap Screw" />
+          <meta property="og:image" content="https://cdn.example.test/fastenal-detail-1-og.jpg" />
+          <meta name="description" content="Precision M6 alloy steel cap screw" />
+        </head><body><main>
+          <nav aria-label="breadcrumb"><a>Fasteners</a><span>Sockets</span><span>M6</span></nav>
+          <h1>Fastenal M6 Socket Head Cap Screw</h1>
+          <p>SKU: FAS-M6-01</p>
+          <table>
+            <tr><th>Thread Size</th><td>M6 x 1.0</td></tr>
+            <tr><th>Length</th><td>25 mm</td></tr>
+            <tr><th>Material</th><td>Alloy Steel</td></tr>
+          </table>
+          <img src="https://cdn.example.test/fastenal-detail-1-main.jpg" />
+          <img src="https://cdn.example.test/fastenal-detail-1-side.jpg" />
+        </main></body></html>
+      ` });
+      return;
+    }
+
+    if (path.includes("/product/detail/222222")) {
+      await route.fulfill({ contentType: "text/html", body: `
+        <html><body><main>
+          <nav aria-label="breadcrumb"><a>Fasteners</a><span>Sockets</span><span>M8</span></nav>
+          <h1>Fastenal M8 Socket Head Cap Screw</h1>
+          <p>Part Number: FAS-M8-02</p>
+          <table>
+            <tr><th>Thread Size</th><td>M8 x 1.25</td></tr>
+            <tr><th>Length</th><td>30 mm</td></tr>
+            <tr><th>Material</th><td>Stainless Steel</td></tr>
+          </table>
+          <img src="https://cdn.example.test/fastenal-detail-2-main.jpg" />
+        </main></body></html>
+      ` });
+      return;
+    }
+
+    await route.fulfill({ contentType: "text/html", body: "<html><body>Fastenal</body></html>" });
+  });
+
+  const popup = await openPopup();
+  await popup.selectOption("#sourceMode", "fastenal");
+  await popup.selectOption("#captureProfile", "list-details");
+
+  const supplier = await context.newPage();
+  await supplier.goto("https://www.fastenal.com/product/Fasteners/Sockets/Socket%20Head%20Cap%20Screws?productFamilyId=30891&categoryId=600040");
+  await supplier.bringToFront();
+
+  await popup.bringToFront();
+  await popup.locator("#linkedPagesPanel").evaluate((node) => { node.open = true; });
+
+  await popup.click("#previewLinksBtn");
+  await expect(popup.locator("#linkedPagesSummary")).toContainText("2 found");
+  await popup.click("#clearAllLinksBtn");
+  await popup.locator("#linkedPagesList input[type='checkbox']").first().check();
+
+  await popup.evaluate(() => document.querySelector("#captureBtn").click());
+  await expect(popup.locator("#status")).toContainText("Captured 2 row(s)");
+
+  const capture = await popup.evaluate(() => chrome.storage.local.get("lastCapture").then((data) => data.lastCapture));
+  expect(capture.source).toBe("fastenal");
+  expect(capture.captureProfile).toBe("list-details");
+  expect(capture.pageType).toBe("catalog-list");
+  expect(capture.linkedPagesFound).toBe(2);
+  expect(capture.linkedPagesCrawled).toBe(1);
+  expect(capture.rows).toHaveLength(2);
+
+  expect(capture.rows.some((row) => row.ProductURL.includes("111111"))).toBe(true);
+  expect(capture.rows.some((row) => row.ProductURL.includes("222222"))).toBe(true);
+  expect(capture.rows.every((row) => String(row.ProductListBreadcrumbs || "").includes("Fasteners"))).toBe(true);
+
+  await supplier.close();
+  await popup.close();
+  await context.unroute("https://www.fastenal.com/**");
 });

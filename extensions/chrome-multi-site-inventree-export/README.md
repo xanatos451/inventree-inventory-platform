@@ -45,6 +45,7 @@ Select **Save Connection Settings**. The token is stored in Chrome's local exten
 - McMaster-Carr category and product pages
 - Bolt Depot product tables and parent/child catalog pages
 - Amazon order and product pages
+- Fastenal category/list and product pages
 
 ## Workflow
 

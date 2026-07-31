@@ -1,6 +1,6 @@
 from django.urls import path
 
-from .views import CaptureCleanupView, CaptureDatasetRowsView, CaptureDetailView, CaptureFieldInspectionView, CaptureImagePrefetchView, CaptureListCreateView, CapturePinView, CaptureWorkspaceView, CreateCaptureCategoriesView, CreateCapturePartsView, CreateCaptureStockView, ExcludeCapturePrefetchFailuresView, HealthView, ImportCapturePartDetailsView, ImportCaptureProcurementView, ImportPlanView, MappingPreviewView, MappingProfileDetailView, MappingProfileListCreateView, PartImageGalleryView
+from .views import CaptureCandidatesView, CaptureCleanupView, CaptureDatasetRowsView, CaptureDetailView, CaptureFieldInspectionView, CaptureImagePrefetchView, CaptureListCreateView, CaptureNormalizeView, CapturePinView, CaptureWorkspaceView, CreateCaptureCategoriesView, CreateCapturePartsView, CreateCaptureStockView, ExcludeCapturePrefetchFailuresView, HealthView, ImportCapturePartDetailsView, ImportCaptureProcurementView, ImportPlanView, MappingPreviewView, MappingProfileDetailView, MappingProfileListCreateView, PartImageGalleryView
 
 urlpatterns = [
     path("health/", HealthView.as_view(), name="health"),
@@ -14,6 +14,8 @@ urlpatterns = [
     path("captures/<int:pk>/", CaptureDetailView.as_view(), name="capture-detail"),
     path("captures/<int:pk>/pin/", CapturePinView.as_view(), name="capture-pin"),
     path("captures/<int:pk>/preview/", MappingPreviewView.as_view(), name="capture-preview"),
+    path("captures/<int:pk>/ai/normalize/", CaptureNormalizeView.as_view(), name="capture-ai-normalize"),
+    path("captures/<int:pk>/ai/candidates/", CaptureCandidatesView.as_view(), name="capture-ai-candidates"),
     path("captures/<int:pk>/plan/", ImportPlanView.as_view(), name="capture-plan"),
     path("captures/<int:pk>/categories/", CreateCaptureCategoriesView.as_view(), name="capture-create-categories"),
     path("captures/<int:pk>/parts/", CreateCapturePartsView.as_view(), name="capture-create-parts"),

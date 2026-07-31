@@ -30,7 +30,7 @@ function settings() {
     inventreeUrl: els.inventreeUrl.value.trim(),
     inventreeToken: els.inventreeToken.value.trim(),
     inventreeEndpointPath: els.inventreeEndpointPath.value.trim() || "/plugin/multi-site-importer/captures/",
-    sourceMode: ["auto", "mcmaster", "boltdepot", "amazon"].includes(els.sourceMode.value) ? els.sourceMode.value : "auto",
+    sourceMode: ["auto", "mcmaster", "boltdepot", "amazon", "fastenal"].includes(els.sourceMode.value) ? els.sourceMode.value : "auto",
     captureProfile: ["auto", "list-details", "single-item"].includes(els.captureProfile.value) ? els.captureProfile.value : "auto",
     crawlLinkedPages: true,
     maxLinkedPages: Number(els.maxLinkedPages.value || 100)
@@ -43,6 +43,7 @@ function providerForUrl(url) {
     if (host.includes("mcmaster.com")) return "mcmaster";
     if (host.includes("boltdepot.com")) return "boltdepot";
     if (host.includes("amazon.")) return "amazon";
+    if (host.includes("fastenal.com")) return "fastenal";
   } catch {
     // Ignore browser-internal, extension, and malformed URLs.
   }

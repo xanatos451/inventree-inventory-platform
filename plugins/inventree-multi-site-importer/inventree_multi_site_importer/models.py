@@ -7,6 +7,7 @@ from django.dispatch import receiver
 class MappingProfile(models.Model):
     """Reusable, server-owned transformation rules for a capture scope."""
 
+    id = models.AutoField(primary_key=True)
     name = models.CharField(max_length=200)
     source = models.CharField(max_length=80, blank=True)
     capture_profile = models.CharField(max_length=80, blank=True)
@@ -44,6 +45,7 @@ class CaptureImport(models.Model):
         COMPLETE = "complete", "Complete"
         FAILED = "failed", "Failed"
 
+    id = models.AutoField(primary_key=True)
     contract_version = models.CharField(max_length=20, default="1.0")
     capture_profile = models.CharField(max_length=80, default="auto")
     source = models.CharField(max_length=80)
@@ -95,6 +97,7 @@ class ImagePrefetch(models.Model):
         FAILED = "failed", "Failed"
         EXCLUDED = "excluded", "Excluded"
 
+    id = models.AutoField(primary_key=True)
     capture = models.ForeignKey(
         CaptureImport,
         on_delete=models.CASCADE,
@@ -131,6 +134,7 @@ class ImagePrefetch(models.Model):
 class StockImportRecord(models.Model):
     """Idempotency ledger for explicitly confirmed stock creation."""
 
+    id = models.AutoField(primary_key=True)
     capture = models.ForeignKey(
         CaptureImport, on_delete=models.CASCADE, related_name="stock_import_records"
     )

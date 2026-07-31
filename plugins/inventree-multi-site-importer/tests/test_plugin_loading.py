@@ -38,7 +38,7 @@ class PluginLoadingTests(unittest.TestCase):
             core = importlib.import_module(f"{package_name}.core")
             patterns = core.MultiSiteImporterPlugin().setup_urls()
 
-        self.assertEqual(package.PLUGIN_VERSION, "0.2.1")
+        self.assertEqual(package.PLUGIN_VERSION, "0.2.2")
         self.assertEqual(patterns[0][1][0], f"{package_name}.urls")
         self.assertNotIn(f"{package_name}.urls", sys.modules)
         self.assertNotIn(f"{package_name}.models", sys.modules)
@@ -175,6 +175,29 @@ class PluginLoadingTests(unittest.TestCase):
         self.assertIn("stock_write_count=0", cleanup_source)
         self.assertIn("--execute", command_source)
         self.assertIn('path("captures/cleanup/"', urls)
+
+    def test_generated_id_migration_branch_is_canonicalized_and_merged(self):
+        root = __import__("pathlib").Path(__file__).parents[1]
+        migrations = root / "inventree_multi_site_importer" / "migrations"
+        generated = (
+            migrations
+            / "0005_alter_captureimport_id_alter_imageprefetch_id_and_more.py"
+        ).read_text(encoding="utf-8")
+        merge = (
+            migrations
+            / "0007_merge_0005_generated_0006_capture_retention.py"
+        ).read_text(encoding="utf-8")
+        models_source = (
+            root / "inventree_multi_site_importer" / "models.py"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(generated.count("models.AutoField("), 3)
+        self.assertIn("0006_capture_retention", merge)
+        self.assertIn(
+            "0005_alter_captureimport_id_alter_imageprefetch_id_and_more",
+            merge,
+        )
+        self.assertIn('model_name="stockimportrecord"', merge)
+        self.assertEqual(models_source.count("id = models.AutoField(primary_key=True)"), 4)
 
 
 if __name__ == "__main__":

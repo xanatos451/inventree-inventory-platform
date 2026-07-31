@@ -46,6 +46,15 @@ _remote_images_spec.loader.exec_module(_remote_images)
 RemoteImageError = _remote_images.RemoteImageError
 validate_remote_url = _remote_images.validate_remote_url
 
+_ai_assistant_spec = importlib.util.spec_from_file_location(
+    "supplier_ai_assistant",
+    Path(__file__).parents[1] / "inventree_multi_site_importer" / "ai_assistant.py",
+)
+_ai_assistant = importlib.util.module_from_spec(_ai_assistant_spec)
+_ai_assistant_spec.loader.exec_module(_ai_assistant)
+normalize_captured_row = _ai_assistant.normalize_captured_row
+build_candidate_matches = _ai_assistant.build_candidate_matches
+
 
 def validate_capture(payload):
     required = ("contract_version", "capture_profile", "source", "captured_at", "page_url", "headers", "rows")
@@ -59,6 +68,56 @@ def validate_capture(payload):
 
 
 class CaptureContractTests(unittest.TestCase):
+    def test_ai_normalization_extracts_fastener_canonical_attributes(self):
+        normalized = normalize_captured_row(
+            {
+                "Product": "Socket Head Cap Screw",
+                "Description": "M6 x 1.0 x 25 mm Alloy Steel Black Oxide",
+                "FastenalPartNumber": "FAS-M6-01",
+            },
+            {
+                "part.name": "Socket Head Cap Screw",
+                "supplier.sku": "FAS-M6-01",
+            },
+            source="fastenal",
+            capture_id=77,
+            row_index=3,
+        )
+        canonical = normalized["canonical"]
+        self.assertEqual(canonical["type"], "socket-head-cap-screw")
+        self.assertEqual(canonical["thread"], "m6x1.0")
+        self.assertEqual(canonical["length_mm"], 25.0)
+        self.assertEqual(canonical["material"], "alloy-steel")
+        self.assertEqual(canonical["finish"], "black-oxide")
+        self.assertIn("m6x1.0", canonical["fingerprint"])
+
+    def test_ai_candidate_matching_prefers_closest_part(self):
+        incoming = normalize_captured_row(
+            {
+                "Product": "Socket Head Cap Screw",
+                "Description": "M6 x 1.0 x 25 mm Alloy Steel",
+            },
+            {"part.name": "Socket Head Cap Screw", "part.ipn": ""},
+            source="capture",
+        )
+        candidates = [
+            {
+                "pk": 1,
+                "IPN": "SCR-M6-25-SHCS",
+                "name": "Socket Head Cap Screw M6 x 1.0 x 25 mm",
+                "description": "Alloy steel hex socket",
+            },
+            {
+                "pk": 2,
+                "IPN": "SCR-M8-30-SHCS",
+                "name": "Socket Head Cap Screw M8 x 1.25 x 30 mm",
+                "description": "Stainless steel",
+            },
+        ]
+        ranked = build_candidate_matches(incoming, candidates, limit=2, min_score=0.0)
+        self.assertEqual(len(ranked), 2)
+        self.assertGreater(ranked[0]["score"], ranked[1]["score"])
+        self.assertEqual(ranked[0]["part_id"], 1)
     def test_remote_image_url_requires_public_http_address(self):
         public = lambda *_args: [(2, 1, 6, "", ("93.184.216.34", 443))]
         private = lambda *_args: [(2, 1, 6, "", ("127.0.0.1", 80))]
