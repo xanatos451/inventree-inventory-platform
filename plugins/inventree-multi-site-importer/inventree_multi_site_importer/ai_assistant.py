@@ -60,6 +60,13 @@ _LENGTH_RE = re.compile(
     re.IGNORECASE,
 )
 
+_DYNAMIC_KEYWORD_CATEGORIES = {
+    "type",
+    "drive",
+    "material",
+    "finish",
+}
+
 
 def _norm_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
@@ -124,6 +131,65 @@ def _extract_keyword_pairs(text: str, keywords: list[tuple[str, str]]) -> str:
     return ""
 
 
+def _dynamic_entries(
+    dynamic_keywords: dict[str, Any] | None,
+    category: str,
+) -> list[tuple[str, str]]:
+    if not isinstance(dynamic_keywords, dict):
+        return []
+    if category not in _DYNAMIC_KEYWORD_CATEGORIES:
+        return []
+
+    raw_entries = dynamic_keywords.get(category)
+    pairs: list[tuple[str, str]] = []
+
+    if isinstance(raw_entries, dict):
+        for needle, canonical in raw_entries.items():
+            needle_text = _norm_text(needle).lower()
+            canonical_text = _norm_slug(canonical or needle)
+            if needle_text and canonical_text:
+                pairs.append((needle_text, canonical_text))
+    elif isinstance(raw_entries, list):
+        for entry in raw_entries:
+            if isinstance(entry, dict):
+                needle_text = _norm_text(entry.get("term", "")).lower()
+                canonical_text = _norm_slug(entry.get("canonical", "") or needle_text)
+            else:
+                needle_text = _norm_text(entry).lower()
+                canonical_text = _norm_slug(needle_text)
+            if needle_text and canonical_text:
+                pairs.append((needle_text, canonical_text))
+
+    # Prefer longer terms first so specific matches win over generic ones.
+    return sorted(set(pairs), key=lambda item: len(item[0]), reverse=True)
+
+
+def _extract_keyword_with_dynamic(
+    text: str,
+    static_keywords: list[str],
+    dynamic_keywords: dict[str, Any] | None,
+    category: str,
+) -> str:
+    lower = (text or "").lower()
+    for needle, canonical in _dynamic_entries(dynamic_keywords, category):
+        if needle in lower:
+            return canonical
+    return _extract_keyword(text, static_keywords)
+
+
+def _extract_keyword_pairs_with_dynamic(
+    text: str,
+    static_keywords: list[tuple[str, str]],
+    dynamic_keywords: dict[str, Any] | None,
+    category: str,
+) -> str:
+    lower = (text or "").lower()
+    for needle, canonical in _dynamic_entries(dynamic_keywords, category):
+        if needle in lower:
+            return canonical
+    return _extract_keyword_pairs(text, static_keywords)
+
+
 def _combine_text(raw_row: dict[str, Any], mapped_item: dict[str, Any]) -> str:
     chunks = []
     for value in list((raw_row or {}).values()) + list((mapped_item or {}).values()):
@@ -141,6 +207,7 @@ def normalize_captured_row(
     source: str = "",
     capture_id: int | None = None,
     row_index: int | None = None,
+    dynamic_keywords: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Normalize one capture row into canonical attributes for matching."""
     mapped_item = mapped_item or {}
@@ -165,12 +232,32 @@ def normalize_captured_row(
         ["Supplier SKU", "McMasterPartNumber", "BoltDepotPartNumber", "FastenalPartNumber", "ASIN"],
     )
 
-    canonical_type = _extract_keyword_pairs(combined, _TYPE_KEYWORDS)
+    canonical_type = _extract_keyword_pairs_with_dynamic(
+        combined,
+        _TYPE_KEYWORDS,
+        dynamic_keywords,
+        "type",
+    )
     canonical_thread = _extract_thread(combined)
     canonical_length_mm = _extract_length_mm(combined)
-    canonical_drive = _extract_keyword_pairs(combined, _DRIVE_KEYWORDS)
-    canonical_material = _extract_keyword(combined, _MATERIAL_KEYWORDS)
-    canonical_finish = _extract_keyword(combined, _FINISH_KEYWORDS)
+    canonical_drive = _extract_keyword_pairs_with_dynamic(
+        combined,
+        _DRIVE_KEYWORDS,
+        dynamic_keywords,
+        "drive",
+    )
+    canonical_material = _extract_keyword_with_dynamic(
+        combined,
+        _MATERIAL_KEYWORDS,
+        dynamic_keywords,
+        "material",
+    )
+    canonical_finish = _extract_keyword_with_dynamic(
+        combined,
+        _FINISH_KEYWORDS,
+        dynamic_keywords,
+        "finish",
+    )
 
     fingerprint_parts = [
         canonical_type,
@@ -222,7 +309,11 @@ def _part_text(part: dict[str, Any]) -> str:
     ).strip()
 
 
-def score_candidate_part(normalized_item: dict[str, Any], candidate_part: dict[str, Any]) -> dict[str, Any]:
+def score_candidate_part(
+    normalized_item: dict[str, Any],
+    candidate_part: dict[str, Any],
+    dynamic_keywords: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Score one candidate part against a normalized incoming row."""
     incoming = dict(normalized_item or {})
     incoming_canonical = dict(incoming.get("canonical") or {})
@@ -234,6 +325,7 @@ def score_candidate_part(normalized_item: dict[str, Any], candidate_part: dict[s
         },
         {},
         source="existing-part",
+        dynamic_keywords=dynamic_keywords,
     )
     candidate_canonical = candidate_normalized.get("canonical") or {}
 
@@ -300,11 +392,16 @@ def build_candidate_matches(
     candidate_parts: list[dict[str, Any]],
     limit: int = 5,
     min_score: float = 0.35,
+    dynamic_keywords: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Build ranked candidate part matches for one normalized capture row."""
     ranked = []
     for part in candidate_parts or []:
-        scored = score_candidate_part(normalized_item, part)
+        scored = score_candidate_part(
+            normalized_item,
+            part,
+            dynamic_keywords=dynamic_keywords,
+        )
         if scored["score"] < float(min_score):
             continue
         ranked.append(

@@ -154,6 +154,78 @@ class StockImportRecord(models.Model):
         ]
 
 
+class AIAssistantLexiconEntry(models.Model):
+    """Approved terms that augment deterministic AI normalization."""
+
+    class Category(models.TextChoices):
+        TYPE = "type", "Type"
+        DRIVE = "drive", "Drive"
+        MATERIAL = "material", "Material"
+        FINISH = "finish", "Finish"
+
+    id = models.AutoField(primary_key=True)
+    category = models.CharField(max_length=20, choices=Category.choices)
+    term = models.CharField(max_length=255)
+    canonical_value = models.CharField(max_length=255)
+    source = models.CharField(max_length=40, default="decision")
+    approved_count = models.PositiveIntegerField(default=0)
+    rejected_count = models.PositiveIntegerField(default=0)
+    confidence = models.FloatField(default=0.5)
+    is_active = models.BooleanField(default=True)
+    last_seen_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        app_label = "inventree_multi_site_importer"
+        ordering = ["category", "-approved_count", "term", "pk"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["category", "term"],
+                name="unique_ai_lexicon_category_term",
+            )
+        ]
+
+
+class AIAssistantDecisionLog(models.Model):
+    """Audit log of accepted or rejected AI suggestions."""
+
+    class Action(models.TextChoices):
+        ACCEPTED = "accepted", "Accepted"
+        REJECTED = "rejected", "Rejected"
+        EDITED = "edited", "Edited"
+
+    id = models.AutoField(primary_key=True)
+    capture = models.ForeignKey(
+        CaptureImport,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ai_decisions",
+    )
+    row_index = models.PositiveIntegerField(null=True, blank=True)
+    suggestion_type = models.CharField(max_length=40, default="mapping")
+    action = models.CharField(max_length=20, choices=Action.choices)
+    target = models.CharField(max_length=255, blank=True)
+    suggested_value = models.TextField(blank=True)
+    applied_value = models.TextField(blank=True)
+    confidence = models.FloatField(null=True, blank=True)
+    rationale = models.TextField(blank=True)
+    payload = models.JSONField(default=dict, blank=True)
+    decided_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="supplier_ai_decisions",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        app_label = "inventree_multi_site_importer"
+        ordering = ["-created_at", "-pk"]
+
+
 @receiver(post_delete, sender=ImagePrefetch)
 def delete_image_prefetch_file(sender, instance, **kwargs):
     if instance.cached_file:

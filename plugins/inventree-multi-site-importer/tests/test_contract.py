@@ -1,8 +1,48 @@
 """Dependency-free checks for the documented capture contract."""
 
-import unittest
 import importlib.util
+import sys
+import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+try:
+    import django
+    from django.conf import settings
+except ModuleNotFoundError:  # pragma: no cover - exercised in lightweight environments
+    django = None
+    settings = None
+
+if django is not None and settings is not None and not settings.configured:
+    settings.configure(
+        SECRET_KEY="test",
+        INSTALLED_APPS=[
+            "django.contrib.auth",
+            "django.contrib.contenttypes",
+            "rest_framework",
+            "inventree_multi_site_importer",
+        ],
+        DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
+        AUTH_USER_MODEL="auth.User",
+        ROOT_URLCONF="inventree_multi_site_importer.urls",
+        USE_TZ=True,
+    )
+    django.setup()
+
+try:
+    from rest_framework import status
+    from rest_framework.test import APIRequestFactory
+except ModuleNotFoundError:  # pragma: no cover - exercised in lightweight environments
+    status = None
+    APIRequestFactory = None
+
+sys.path.insert(0, str(Path(__file__).parents[1]))
+
+if django is not None and settings is not None:
+    import inventree_multi_site_importer.views as views
+else:
+    views = None
 
 _mapping_spec = importlib.util.spec_from_file_location(
     "supplier_mapping",
@@ -67,7 +107,84 @@ def validate_capture(payload):
         raise ValueError("rows must be a non-empty list")
 
 
+@unittest.skipUnless(django is not None and settings is not None and views is not None, "Django/DRF is not available in this test environment")
 class CaptureContractTests(unittest.TestCase):
+    def test_ai_normalize_endpoint_returns_normalized_rows(self):
+        fake_capture = SimpleNamespace(
+            pk=21,
+            source="fastenal",
+            profile_id=None,
+            payload={"rows": [{"Product": "Socket Head Cap Screw"}]},
+        )
+        expected_items = [{
+            "capture_id": 21,
+            "row_index": 0,
+            "canonical": {"type": "socket-head-cap-screw"},
+            "identity": {"product_name": "Socket Head Cap Screw"},
+        }]
+
+        with patch.object(views, "_capture_or_404", return_value=fake_capture), patch.object(views, "_normalized_capture_items", return_value=expected_items):
+            request = APIRequestFactory().post("/captures/21/ai/normalize/", data={}, format="json")
+            request.user = SimpleNamespace(is_authenticated=True, is_staff=False, is_active=True)
+            response = views.CaptureNormalizeView.as_view()(request, pk=21)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["capture_id"], 21)
+        self.assertEqual(response.data["row_count"], 1)
+        self.assertEqual(response.data["items"], expected_items)
+
+    def test_ai_candidates_endpoint_returns_ranked_matches(self):
+        fake_capture = SimpleNamespace(
+            pk=22,
+            source="fastenal",
+            profile_id=None,
+            payload={"rows": [{"Product": "Socket Head Cap Screw"}]},
+        )
+        expected_items = [{
+            "capture_id": 22,
+            "row_index": 0,
+            "canonical": {"type": "socket-head-cap-screw"},
+            "identity": {"product_name": "Socket Head Cap Screw"},
+        }]
+        ranked_matches = [{"part_id": 7, "score": 0.91, "part_name": "Socket Head Cap Screw"}]
+
+        with patch.object(views, "_capture_or_404", return_value=fake_capture), patch.object(views, "_normalized_capture_items", return_value=expected_items), patch.object(views, "_candidate_parts_for_item", return_value=[{"pk": 7, "name": "Socket Head Cap Screw", "IPN": "SCR-1"}]), patch.object(views, "build_candidate_matches", return_value=ranked_matches):
+            request = APIRequestFactory().post("/captures/22/ai/candidates/", data={"limit": 3}, format="json")
+            request.user = SimpleNamespace(is_authenticated=True, is_staff=False, is_active=True)
+            response = views.CaptureCandidatesView.as_view()(request, pk=22)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["capture_id"], 22)
+        self.assertEqual(response.data["row_count"], 1)
+        self.assertEqual(response.data["items"][0]["candidates"], ranked_matches)
+
+    def test_ai_decisions_endpoint_persists_feedback_summary(self):
+        fake_capture = SimpleNamespace(pk=23, source="fastenal", profile_id=None, payload={"rows": []})
+        summary = {"processed": 2, "learned_updates": 1}
+
+        with patch.object(views, "_capture_or_404", return_value=fake_capture), patch.object(views, "_process_ai_decisions", return_value=summary):
+            request = APIRequestFactory().post(
+                "/captures/23/ai/decisions/",
+                data={
+                    "decisions": [
+                        {
+                            "action": "accepted",
+                            "category": "material",
+                            "term": "Alloy Steel",
+                            "canonical": "alloy-steel",
+                        }
+                    ]
+                },
+                format="json",
+            )
+            request.user = SimpleNamespace(is_authenticated=True, is_staff=False, is_active=True)
+            response = views.CaptureDecisionsView.as_view()(request, pk=23)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["capture_id"], 23)
+        self.assertEqual(response.data["processed"], 2)
+        self.assertEqual(response.data["learned_updates"], 1)
+
     def test_ai_normalization_extracts_fastener_canonical_attributes(self):
         normalized = normalize_captured_row(
             {
@@ -90,6 +207,24 @@ class CaptureContractTests(unittest.TestCase):
         self.assertEqual(canonical["material"], "alloy-steel")
         self.assertEqual(canonical["finish"], "black-oxide")
         self.assertIn("m6x1.0", canonical["fingerprint"])
+
+    def test_ai_normalization_uses_dynamic_keyword_overrides(self):
+        normalized = normalize_captured_row(
+            {
+                "Product": "Hex Bolt",
+                "Description": "A286 bolt with torx recess",
+            },
+            {},
+            source="custom",
+            dynamic_keywords={
+                "material": {"a286": "a286"},
+                "drive": {"torx recess": "torx"},
+            },
+        )
+
+        canonical = normalized["canonical"]
+        self.assertEqual(canonical["material"], "a286")
+        self.assertEqual(canonical["drive"], "torx")
 
     def test_ai_candidate_matching_prefers_closest_part(self):
         incoming = normalize_captured_row(

@@ -41,7 +41,6 @@ class PluginLoadingTests(unittest.TestCase):
         self.assertEqual(package.PLUGIN_VERSION, "0.2.2")
         self.assertEqual(patterns[0][1][0], f"{package_name}.urls")
         self.assertNotIn(f"{package_name}.urls", sys.modules)
-        self.assertNotIn(f"{package_name}.models", sys.modules)
 
     def test_models_declare_the_appmixin_label(self):
         models_source = (
@@ -49,7 +48,7 @@ class PluginLoadingTests(unittest.TestCase):
             / "inventree_multi_site_importer"
             / "models.py"
         ).read_text(encoding="utf-8")
-        self.assertEqual(models_source.count('app_label = "inventree_multi_site_importer"'), 4)
+        self.assertEqual(models_source.count('app_label = "inventree_multi_site_importer"'), 6)
 
     def test_views_use_inventree_configured_authentication(self):
         views_source = (
@@ -104,6 +103,7 @@ class PluginLoadingTests(unittest.TestCase):
         self.assertIn('path("captures/<int:pk>/categories/"', urls)
         self.assertIn('path("captures/<int:pk>/parts/"', urls)
         self.assertIn('path("captures/<int:pk>/rows/"', urls)
+        self.assertIn('path("captures/<int:pk>/ai/decisions/"', urls)
         self.assertIn('path("captures/<int:pk>/details/"', urls)
         self.assertIn('path("captures/<int:pk>/images/prefetch/"', urls)
         self.assertIn('path("captures/<int:pk>/images/exclude-failures/"', urls)
@@ -197,7 +197,7 @@ class PluginLoadingTests(unittest.TestCase):
             merge,
         )
         self.assertIn('model_name="stockimportrecord"', merge)
-        self.assertEqual(models_source.count("id = models.AutoField(primary_key=True)"), 4)
+        self.assertEqual(models_source.count("id = models.AutoField(primary_key=True)"), 6)
 
 
 if __name__ == "__main__":

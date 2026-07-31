@@ -150,6 +150,11 @@ Apply penalties:
 - `POST /captures/{id}/ai/decisions/`
   - Persists accept/reject actions with rationale and timestamp.
 
+Implemented baseline:
+
+- Decision logs are persisted for accepted/rejected/edited actions.
+- Accepted decisions can update a dynamic keyword lexicon (`type`, `drive`, `material`, `finish`) used by normalization.
+
 All routes require auth and must respect capture ownership scope.
 
 ## Workspace UI Additions

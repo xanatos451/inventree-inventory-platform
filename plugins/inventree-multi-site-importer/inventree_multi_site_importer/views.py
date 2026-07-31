@@ -1,4 +1,5 @@
 import logging
+import re
 from functools import lru_cache
 from datetime import timedelta
 
@@ -6,11 +7,11 @@ from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.shortcuts import render
-from django.db import transaction
+from django.db import DatabaseError, transaction
 from django.utils import timezone
 
 from .cleanup import capture_cleanup_catalog, cleanup_selected
-from .models import CaptureImport, ImagePrefetch, MappingProfile, StockImportRecord
+from .models import AIAssistantDecisionLog, AIAssistantLexiconEntry, CaptureImport, ImagePrefetch, MappingProfile, StockImportRecord
 from .mapping import map_row, preview_rows
 from .planning import build_import_plan
 from .inspection import display_value, field_catalog, inspect_field, ordered_fields
@@ -21,6 +22,13 @@ from .ai_assistant import build_candidate_matches, normalize_captured_row
 
 
 logger = logging.getLogger(__name__)
+
+_AI_LEXICON_CATEGORIES = {
+    "type",
+    "drive",
+    "material",
+    "finish",
+}
 
 
 def _capture_queryset_for_request(request):
@@ -163,7 +171,132 @@ def _mapped_capture_items(capture, rules, request_data):
     return items
 
 
-def _normalized_capture_items(capture, rules, request_data):
+def _norm_learning_text(value, max_length=255):
+    text = re.sub(r"\s+", " ", str(value or "")).strip().lower()
+    return text[:max_length]
+
+
+def _load_dynamic_keywords():
+    """Load active learned terms for the deterministic normalizer."""
+    result = {category: {} for category in _AI_LEXICON_CATEGORIES}
+    try:
+        queryset = AIAssistantLexiconEntry.objects.filter(is_active=True)
+        for row in queryset.values("category", "term", "canonical_value"):
+            category = str(row.get("category") or "")
+            term = _norm_learning_text(row.get("term", ""))
+            canonical = _norm_learning_text(row.get("canonical_value", ""))
+            if category in result and term and canonical:
+                result[category][term] = canonical
+    except DatabaseError:
+        # Lightweight unit tests can run without migrated plugin tables.
+        return {}
+    except Exception:
+        logger.exception("Could not load dynamic AI lexicon entries")
+        return {}
+
+    return {category: terms for category, terms in result.items() if terms}
+
+
+def _apply_lexicon_feedback(category, term, canonical, action):
+    category = str(category or "").strip().lower()
+    if category not in _AI_LEXICON_CATEGORIES:
+        return False
+
+    normalized_term = _norm_learning_text(term)
+    normalized_canonical = _norm_learning_text(canonical or term)
+    if not normalized_term or not normalized_canonical:
+        return False
+
+    entry, _created = AIAssistantLexiconEntry.objects.get_or_create(
+        category=category,
+        term=normalized_term,
+        defaults={
+            "canonical_value": normalized_canonical,
+            "source": "decision",
+            "approved_count": 0,
+            "rejected_count": 0,
+            "confidence": 0.5,
+            "is_active": True,
+        },
+    )
+
+    changed_fields = {"updated_at", "last_seen_at"}
+    if action in {
+        AIAssistantDecisionLog.Action.ACCEPTED,
+        AIAssistantDecisionLog.Action.EDITED,
+    }:
+        entry.approved_count += 1
+        changed_fields.add("approved_count")
+        if normalized_canonical:
+            entry.canonical_value = normalized_canonical
+            changed_fields.add("canonical_value")
+    elif action == AIAssistantDecisionLog.Action.REJECTED:
+        entry.rejected_count += 1
+        changed_fields.add("rejected_count")
+
+    total = entry.approved_count + entry.rejected_count
+    entry.confidence = round(entry.approved_count / total, 4) if total else 0.5
+    entry.is_active = not (entry.rejected_count > entry.approved_count and total >= 4)
+    changed_fields.update({"confidence", "is_active"})
+    entry.save(update_fields=sorted(changed_fields))
+    return True
+
+
+def _process_ai_decisions(capture, user, decisions):
+    if not isinstance(decisions, list) or not decisions:
+        raise ValueError("decisions must be a non-empty array.")
+
+    action_values = {
+        AIAssistantDecisionLog.Action.ACCEPTED,
+        AIAssistantDecisionLog.Action.REJECTED,
+        AIAssistantDecisionLog.Action.EDITED,
+    }
+    processed = 0
+    learned_updates = 0
+
+    with transaction.atomic():
+        for decision in decisions:
+            if not isinstance(decision, dict):
+                continue
+
+            action = str(decision.get("action") or "").strip().lower()
+            if action not in action_values:
+                raise ValueError("Each decision action must be accepted, rejected, or edited.")
+
+            category = str(decision.get("category") or "").strip().lower()
+            term = decision.get("term")
+            canonical = decision.get("canonical")
+
+            AIAssistantDecisionLog.objects.create(
+                capture=capture,
+                row_index=decision.get("row_index"),
+                suggestion_type=str(decision.get("suggestion_type") or "mapping")[:40],
+                action=action,
+                target=str(decision.get("target") or "")[:255],
+                suggested_value=str(decision.get("suggested_value") or "")[:8000],
+                applied_value=str(decision.get("applied_value") or "")[:8000],
+                confidence=decision.get("confidence"),
+                rationale=str(decision.get("rationale") or "")[:4000],
+                payload=decision.get("payload") if isinstance(decision.get("payload"), dict) else {},
+                decided_by=user if getattr(user, "is_authenticated", False) else None,
+            )
+
+            if term and category in _AI_LEXICON_CATEGORIES:
+                if _apply_lexicon_feedback(category, term, canonical, action):
+                    learned_updates += 1
+
+            processed += 1
+
+    if processed == 0:
+        raise ValueError("No valid decisions were provided.")
+
+    return {
+        "processed": processed,
+        "learned_updates": learned_updates,
+    }
+
+
+def _normalized_capture_items(capture, rules, request_data, dynamic_keywords=None):
     """Return normalized rows, with mapped values when rules are provided."""
     pairs = select_capture_rows(
         capture.payload.get("rows", []),
@@ -179,6 +312,7 @@ def _normalized_capture_items(capture, rules, request_data):
                 source=capture.source,
                 capture_id=capture.pk,
                 row_index=row_index,
+                dynamic_keywords=dynamic_keywords,
             )
         )
     return items
@@ -422,6 +556,7 @@ class CaptureNormalizeView(APIView):
 
     def post(self, request, pk):
         capture = _capture_or_404(request, pk)
+        dynamic_keywords = _load_dynamic_keywords()
         profile_id = request.data.get("profile") or capture.profile_id
         rules = request.data.get("rules")
         profile = None
@@ -434,7 +569,12 @@ class CaptureNormalizeView(APIView):
             rules = profile.rules
 
         try:
-            items = _normalized_capture_items(capture, rules, request.data)
+            items = _normalized_capture_items(
+                capture,
+                rules,
+                request.data,
+                dynamic_keywords=dynamic_keywords,
+            )
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -455,6 +595,7 @@ class CaptureCandidatesView(APIView):
 
     def post(self, request, pk):
         capture = _capture_or_404(request, pk)
+        dynamic_keywords = _load_dynamic_keywords()
         profile_id = request.data.get("profile") or capture.profile_id
         rules = request.data.get("rules")
         profile = None
@@ -467,7 +608,12 @@ class CaptureCandidatesView(APIView):
             rules = profile.rules
 
         try:
-            items = _normalized_capture_items(capture, rules, request.data)
+            items = _normalized_capture_items(
+                capture,
+                rules,
+                request.data,
+                dynamic_keywords=dynamic_keywords,
+            )
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -488,7 +634,12 @@ class CaptureCandidatesView(APIView):
                     {"detail": "Could not query existing InvenTree parts for candidate matching."},
                     status=status.HTTP_503_SERVICE_UNAVAILABLE,
                 )
-            matches = build_candidate_matches(item, candidates, limit=limit)
+            matches = build_candidate_matches(
+                item,
+                candidates,
+                limit=limit,
+                dynamic_keywords=dynamic_keywords,
+            )
             results.append(
                 {
                     "capture_id": item.get("capture_id"),
@@ -505,6 +656,33 @@ class CaptureCandidatesView(APIView):
                 "profile_id": profile.pk if profile else None,
                 "row_count": len(results),
                 "items": results,
+            }
+        )
+
+
+class CaptureDecisionsView(APIView):
+    """Persist AI decisions and update dynamic learned keyword entries."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        capture = _capture_or_404(request, pk)
+        decisions = request.data.get("decisions")
+        try:
+            summary = _process_ai_decisions(capture, request.user, decisions)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            logger.exception("Failed to persist AI decisions for capture_id=%s", capture.pk)
+            return Response(
+                {"detail": "Could not persist AI decisions."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        return Response(
+            {
+                "capture_id": capture.pk,
+                **summary,
             }
         )
 
