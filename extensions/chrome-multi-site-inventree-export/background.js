@@ -1805,6 +1805,23 @@ async function executeScraperOnTab(tabId, scraper) {
   function resultScore(result) {
     let score = result?.ok ? 100 : 0;
     const rows = Array.isArray(result?.rows) ? result.rows : (result?.row ? [result.row] : []);
+    const pageType = String(result?.pageType || "").toLowerCase();
+    const title = String(result?.pageTitle || result?.row?.ProductDetailPageTitle || result?.row?.PageTitle || "").trim();
+    const partNumber = String(
+      result?.row?.McMasterPartNumber ||
+      result?.row?.BoltDepotPartNumber ||
+      result?.row?.FastenalPartNumber ||
+      result?.row?.PartNumber ||
+      result?.row?.ProductURL ||
+      ""
+    ).trim();
+
+    if (["category-table", "category-link-list", "catalog-table", "variant-list", "catalog-list", "order-items"].includes(pageType)) {
+      score += 2000;
+    } else if (pageType === "product-detail") {
+      score -= 1000;
+    }
+
     score += rows.length * 1000;
     for (const row of rows.slice(0, 10)) {
       for (const value of Object.values(row || {})) {
@@ -1813,9 +1830,14 @@ async function executeScraperOnTab(tabId, scraper) {
       }
       score += String(row?.ProductDetailSpecs || "").length * 4;
       score += String(row?.ProductDetailBreadcrumbs || "").length * 2;
+      score += String(row?.PageBreadcrumbs || "").length * 2;
+      if (row?.McMasterPartNumber || row?.PartNumber || row?.BoltDepotPartNumber || row?.FastenalPartNumber) score += 250;
     }
-    const title = String(result?.pageTitle || result?.row?.ProductDetailPageTitle || "").trim();
+
     if (title && !/^mcmaster-carr$/i.test(title)) score += 500;
+    if (/^mcmaster-carr$/i.test(title) && !partNumber && pageType === "product-detail") score -= 4000;
+    if (pageType === "product-detail" && !partNumber && !String(result?.row?.ProductDetailSpecs || "").trim()) score -= 1500;
+
     return score;
   }
 
