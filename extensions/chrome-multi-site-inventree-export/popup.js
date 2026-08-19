@@ -40,10 +40,10 @@ function settings() {
 function providerForUrl(url) {
   try {
     const host = new URL(String(url || "")).hostname.toLowerCase();
-    if (host.includes("mcmaster.com")) return "mcmaster";
-    if (host.includes("boltdepot.com")) return "boltdepot";
+    if (host === "mcmaster.com" || host.endsWith(".mcmaster.com")) return "mcmaster";
+    if (host === "boltdepot.com" || host.endsWith(".boltdepot.com")) return "boltdepot";
     if (host.includes("amazon.")) return "amazon";
-    if (host.includes("fastenal.com")) return "fastenal";
+    if (host === "fastenal.com" || host.endsWith(".fastenal.com")) return "fastenal";
   } catch {
     // Ignore browser-internal, extension, and malformed URLs.
   }
@@ -168,7 +168,7 @@ async function previewLinkedPages() {
 async function importDataset() {
   const file = els.datasetFile.files?.[0];
   if (!file) throw new Error("Select a JSON or CSV dataset file first.");
-  if (file.size > 25 * 1024 * 1024) throw new Error("Dataset files are limited to 25 MB.");
+  if (file.size > 8 * 1024 * 1024) throw new Error("Dataset files are limited to 8 MiB.");
 
   setStatus(`Loading ${file.name}…`);
   const response = await sendMessage({

@@ -366,7 +366,7 @@ def score_candidate_part(
         ipn_boost = 0.2
         exact.append("ipn_exact")
 
-    overlap_ratio = len(exact) / 6.0
+    overlap_ratio = len([field for field in exact if field.startswith("canonical.")]) / 6.0
     conflict_penalty = 0.35 if any(
         key in conflicts
         for key in ("canonical.type", "canonical.thread", "canonical.length_mm")

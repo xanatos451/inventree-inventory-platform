@@ -1588,8 +1588,8 @@ function buildImportedDatasetCapture({ fileName, text, metadata }) {
   const safeName = String(fileName || "imported-dataset").trim().slice(0, 240);
   const contents = String(text || "");
   if (!contents.trim()) throw new Error("The selected dataset file is empty.");
-  if (contents.length > 25 * 1024 * 1024) {
-    throw new Error("Dataset files are limited to 25 MB.");
+  if (contents.length > 8 * 1024 * 1024) {
+    throw new Error("Dataset files are limited to 8 MiB.");
   }
 
   let input = {};
@@ -1790,7 +1790,7 @@ function detectProvider(url, sourceMode) {
   if (host.includes("mcmaster.com")) return "mcmaster";
   if (host.includes("boltdepot.com")) return "boltdepot";
   if (host.includes("amazon.")) return "amazon";
-  if (host.includes("fastenal.com")) return "fastenal";
+  if (host === "fastenal.com" || host.endsWith(".fastenal.com")) return "fastenal";
   return "";
 }
 
@@ -2386,12 +2386,17 @@ async function captureAmazonTab(tab, settings, selectedOrderItems) {
 }
 
 async function captureFastenalTab(tab, settings, selectedChildLinks) {
-  if (!/fastenal\.com/i.test(tab.url || "")) {
+  let host = "";
+  try {
+    host = new URL(tab.url || "").hostname.toLowerCase();
+  } catch {
+    throw new Error("Active tab is not a Fastenal page.");
+  }
+  if (host !== "fastenal.com" && !host.endsWith(".fastenal.com")) {
     throw new Error("Active tab is not a Fastenal page.");
   }
 
-  const likelyDetailPath = /\/product\//i.test(tab.url || "") && !/[?&](?:productFamilyId|categoryId)=/i.test(tab.url || "");
-  if (settings.captureProfile === "single-item" || likelyDetailPath) {
+  if (settings.captureProfile === "single-item") {
     const detail = await executeScraperOnTab(tab.id, scrapeFastenalProductDetailData);
     if (!detail?.ok || !detail.row) {
       throw new Error(detail?.error || "This is not a Fastenal product-detail view.");
@@ -3496,8 +3501,9 @@ function scrapeFastenalPageData() {
     if (!url) return false;
     try {
       const parsed = new URL(url);
-      if (!/fastenal\.com$/i.test(parsed.hostname)) return false;
-      return /\/product\//i.test(parsed.pathname);
+      const host = parsed.hostname.toLowerCase();
+      if (host !== "fastenal.com" && !host.endsWith(".fastenal.com")) return false;
+      return /\/product\/detail\//i.test(parsed.pathname);
     } catch {
       return false;
     }

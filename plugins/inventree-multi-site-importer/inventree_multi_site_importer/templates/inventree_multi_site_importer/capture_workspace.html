@@ -287,11 +287,10 @@
           "parameter.Thread Size": {source_field:"ProductDetailThreadSize", regex:""},
           "parameter.Length": {source_field:"ProductDetailLength", regex:""},
           "parameter.Material": {source_field:"Spec_Material", regex:""},
-          "parameter.Canonical Type": {template:"Socket Head Cap Screw", regex:""},
+          "parameter.Canonical Type": {source_field:"ProductDetailPageTitle", regex:""},
           "parameter.Canonical Size": {source_field:"ProductDetailVariant", regex:""},
           "parameter.Canonical Material": {source_field:"Spec_Material", regex:""},
-          "parameter.Canonical Drive": {template:"Hex Socket", regex:""},
-          "parameter.Canonical Fingerprint": {template:"Socket Head Cap Screw|{ProductDetailVariant}|{Spec_Material}|Hex Socket", regex:""}
+          "parameter.Canonical Fingerprint": {template:"{ProductDetailPageTitle}|{ProductDetailVariant}|{Spec_Material}", regex:""}
         },
         "mcmaster-carr|list-details|category-table": {
           "part.ipn": {source_field:"McMasterPartNumber", regex:""},
@@ -310,11 +309,10 @@
           "parameter.Thread Size": {source_field:"Thread", regex:""},
           "parameter.Length": {source_field:"Length", regex:""},
           "parameter.Material": {source_field:"Material", regex:""},
-          "parameter.Canonical Type": {template:"Socket Head Cap Screw", regex:""},
+          "parameter.Canonical Type": {source_field:"Product", regex:""},
           "parameter.Canonical Size": {template:"{Thread} x {Length}", regex:""},
           "parameter.Canonical Material": {source_field:"Material", regex:""},
-          "parameter.Canonical Drive": {template:"Hex Socket", regex:""},
-          "parameter.Canonical Fingerprint": {template:"Socket Head Cap Screw|{Thread} x {Length}|{Material}|Hex Socket", regex:""}
+          "parameter.Canonical Fingerprint": {template:"{Product}|{Thread} x {Length}|{Material}", regex:""}
         },
         "boltdepot|single-item|product-detail": {
           "part.ipn": {source_field:"BoltDepotPartNumber", regex:""},
@@ -422,8 +420,7 @@
           "parameter.Canonical Type": {source_field:"ProductDetailPageTitle", regex:""},
           "parameter.Canonical Size": {template:"{Spec_Thread_Size} x {Spec_Length}", regex:""},
           "parameter.Canonical Material": {source_field:"Spec_Material", regex:""},
-          "parameter.Canonical Drive": {template:"Hex Socket", regex:""},
-          "parameter.Canonical Fingerprint": {template:"{ProductDetailPageTitle}|{Spec_Thread_Size} x {Spec_Length}|{Spec_Material}|Hex Socket", regex:""}
+          "parameter.Canonical Fingerprint": {template:"{ProductDetailPageTitle}|{Spec_Thread_Size} x {Spec_Length}|{Spec_Material}", regex:""}
         },
         "fastenal|list-details|catalog-list": {
           "part.ipn": {source_field:"FastenalPartNumber", regex:""},

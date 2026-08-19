@@ -470,13 +470,14 @@ All routes require normal InvenTree authentication and are mounted under:
 | `POST` | `captures/{id}/images/exclude-failures/` | Explicitly exclude failed prefetched URLs (`confirm: true` required) |
 | `GET` | `captures/{id}/rows/` | Read a paged slice of immutable dataset rows for import selection |
 
-## AI assistant roadmap
-
-See [AI_ASSISTANT_MVP.md](AI_ASSISTANT_MVP.md) for the phased plan and contracts for an advisory AI assistant that helps mapping quality and cross-supplier matching while keeping writes human-approved.
 | `GET`, `POST` | `mapping-profiles/` | List or create mapping profiles |
 | `GET`, `PATCH`, `PUT`, `DELETE` | `mapping-profiles/{id}/` | Retrieve, edit, or delete one mapping profile |
 
 The mapping-profile list accepts `source`, `capture_profile`, and `page_type` query filters.
+
+## AI assistant roadmap
+
+See [AI_ASSISTANT_MVP.md](AI_ASSISTANT_MVP.md) for the phased plan and contracts for an advisory AI assistant that helps mapping quality and cross-supplier matching while keeping writes human-approved.
 
 ## Plugin setting
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 from io import BytesIO
 import mimetypes
@@ -9,14 +10,20 @@ import os
 import socket
 from urllib.parse import urlparse
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import (
+    HTTPHandler,
+    HTTPSHandler,
+    HTTPRedirectHandler,
+    Request,
+    build_opener,
+)
 
 
 class RemoteImageError(ValueError):
     """Raised when a remote image is unsafe or invalid."""
 
 
-def validate_remote_url(url, resolver=socket.getaddrinfo):
+def _validated_remote_target(url, resolver=socket.getaddrinfo):
     parsed = urlparse(str(url or "").strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise RemoteImageError("Image URL must use HTTP or HTTPS.")
@@ -36,6 +43,11 @@ def validate_remote_url(url, resolver=socket.getaddrinfo):
         ip = ipaddress.ip_address(address)
         if not ip.is_global:
             raise RemoteImageError("Image URL resolves to a non-public network address.")
+    return parsed, tuple(sorted(addresses))
+
+
+def validate_remote_url(url, resolver=socket.getaddrinfo):
+    parsed, _addresses = _validated_remote_target(url, resolver=resolver)
     return parsed.geturl()
 
 
@@ -45,6 +57,67 @@ class _SafeRedirectHandler(HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, host, *, connect_host, **kwargs):
+        self._connect_host = connect_host
+        super().__init__(host, **kwargs)
+
+    def connect(self):
+        self.sock = socket.create_connection(
+            (self._connect_host, self.port),
+            self.timeout,
+            self.source_address,
+        )
+        if self._tunnel_host:
+            self._tunnel()
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, host, *, connect_host, **kwargs):
+        self._connect_host = connect_host
+        super().__init__(host, **kwargs)
+
+    def connect(self):
+        sock = socket.create_connection(
+            (self._connect_host, self.port),
+            self.timeout,
+            self.source_address,
+        )
+        if self._tunnel_host:
+            self.sock = sock
+            self._tunnel()
+            sock = self.sock
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+class _PinnedHTTPHandler(HTTPHandler):
+    def http_open(self, req):
+        _parsed, addresses = _validated_remote_target(req.full_url)
+        connect_host = addresses[0]
+        return self.do_open(
+            lambda host, **kwargs: _PinnedHTTPConnection(
+                host,
+                connect_host=connect_host,
+                **kwargs,
+            ),
+            req,
+        )
+
+
+class _PinnedHTTPSHandler(HTTPSHandler):
+    def https_open(self, req):
+        _parsed, addresses = _validated_remote_target(req.full_url)
+        connect_host = addresses[0]
+        return self.do_open(
+            lambda host, **kwargs: _PinnedHTTPSConnection(
+                host,
+                connect_host=connect_host,
+                **kwargs,
+            ),
+            req,
+        )
+
+
 def download_remote_image(url, max_bytes=10 * 1024 * 1024, timeout=15):
     """Download and minimally validate one public image URL."""
     safe_url = validate_remote_url(url)
@@ -52,7 +125,11 @@ def download_remote_image(url, max_bytes=10 * 1024 * 1024, timeout=15):
         safe_url,
         headers={"User-Agent": "InvenTree-Multi-Site-Importer/1.0"},
     )
-    opener = build_opener(_SafeRedirectHandler())
+    opener = build_opener(
+        _SafeRedirectHandler(),
+        _PinnedHTTPHandler(),
+        _PinnedHTTPSHandler(),
+    )
     try:
         with opener.open(request, timeout=timeout) as response:
             content_type = response.headers.get_content_type().lower()

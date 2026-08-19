@@ -94,6 +94,7 @@ _ai_assistant = importlib.util.module_from_spec(_ai_assistant_spec)
 _ai_assistant_spec.loader.exec_module(_ai_assistant)
 normalize_captured_row = _ai_assistant.normalize_captured_row
 build_candidate_matches = _ai_assistant.build_candidate_matches
+score_candidate_part = _ai_assistant.score_candidate_part
 
 
 def validate_capture(payload):
@@ -107,8 +108,14 @@ def validate_capture(payload):
         raise ValueError("rows must be a non-empty list")
 
 
-@unittest.skipUnless(django is not None and settings is not None and views is not None, "Django/DRF is not available in this test environment")
+REQUIRES_DJANGO_DRF = unittest.skipUnless(
+    django is not None and settings is not None and views is not None and APIRequestFactory is not None and status is not None,
+    "Django/DRF is not available in this test environment",
+)
+
+
 class CaptureContractTests(unittest.TestCase):
+    @REQUIRES_DJANGO_DRF
     def test_ai_normalize_endpoint_returns_normalized_rows(self):
         fake_capture = SimpleNamespace(
             pk=21,
@@ -133,6 +140,7 @@ class CaptureContractTests(unittest.TestCase):
         self.assertEqual(response.data["row_count"], 1)
         self.assertEqual(response.data["items"], expected_items)
 
+    @REQUIRES_DJANGO_DRF
     def test_ai_candidates_endpoint_returns_ranked_matches(self):
         fake_capture = SimpleNamespace(
             pk=22,
@@ -158,6 +166,7 @@ class CaptureContractTests(unittest.TestCase):
         self.assertEqual(response.data["row_count"], 1)
         self.assertEqual(response.data["items"][0]["candidates"], ranked_matches)
 
+    @REQUIRES_DJANGO_DRF
     def test_ai_decisions_endpoint_persists_feedback_summary(self):
         fake_capture = SimpleNamespace(pk=23, source="fastenal", profile_id=None, payload={"rows": []})
         summary = {"processed": 2, "learned_updates": 1}
@@ -253,6 +262,35 @@ class CaptureContractTests(unittest.TestCase):
         self.assertEqual(len(ranked), 2)
         self.assertGreater(ranked[0]["score"], ranked[1]["score"])
         self.assertEqual(ranked[0]["part_id"], 1)
+
+    def test_ai_candidate_scoring_does_not_double_count_exact_ipn(self):
+        incoming = normalize_captured_row(
+            {
+                "Product": "Socket Head Cap Screw",
+                "Description": "M6 x 1.0 x 25 mm Alloy Steel Hex Socket",
+            },
+            {"part.name": "Socket Head Cap Screw", "part.ipn": "SCR-M6-25-SHCS"},
+            source="capture",
+        )
+
+        with patch.object(_ai_assistant, "_score_text_similarity", return_value=0.0):
+            scored = score_candidate_part(
+                incoming,
+                {
+                    "pk": 1,
+                    "IPN": "SCR-M6-25-SHCS",
+                    "name": "Socket Head Cap Screw M6 x 1.0 x 25 mm",
+                    "description": "Alloy Steel Hex Socket",
+                },
+            )
+
+        self.assertIn("ipn_exact", scored["exact"])
+        self.assertEqual(
+            len([field for field in scored["exact"] if field.startswith("canonical.")]),
+            5,
+        )
+        self.assertEqual(scored["score"], 0.825)
+
     def test_remote_image_url_requires_public_http_address(self):
         public = lambda *_args: [(2, 1, 6, "", ("93.184.216.34", 443))]
         private = lambda *_args: [(2, 1, 6, "", ("127.0.0.1", 80))]
@@ -403,6 +441,22 @@ class CaptureContractTests(unittest.TestCase):
         ])
         self.assertEqual(plan["summary"]["conflict"], 2)
         self.assertTrue(all(row["errors"] for row in plan["rows"]))
+
+    def test_import_plan_rejects_structural_stock_locations(self):
+        plan = build_import_plan(
+            [{
+                "part.ipn": "STOCK-1",
+                "part.name": "Part With Structural Stock",
+                "part.category": "Fastening",
+                "stock.quantity": "5",
+                "stock.location": "Upper Rack",
+            }],
+            location_lookup=lambda _name: [{"pk": 4, "name": "Upper Rack", "structural": True}],
+        )
+        row = plan["rows"][0]
+        self.assertFalse(plan["ready"])
+        self.assertEqual(row["action"], "error")
+        self.assertIn("Stock location cannot be structural.", row["errors"])
 
     def test_import_plan_preserves_and_validates_product_image_gallery(self):
         plan = build_import_plan([{

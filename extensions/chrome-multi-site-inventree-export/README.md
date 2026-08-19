@@ -71,7 +71,7 @@ Expand **Import a JSON or CSV dataset** to load rows collected outside a support
 
 The imported rows use the normal local preview, raw download, import-queue submission, and InvenTree mapping workspace. Select a **Source identifier** so mapping profiles can be scoped to the dataset's supplier or origin. A **Source URL** is recommended for provenance and host/path-scoped profiles, but offline datasets may omit it. The optional category and subcategory values are fallbacks: they populate only missing or blank row fields and never replace taxonomy already present in the dataset.
 
-Files are limited to 25 MB and 5,000 rows in the extension. Loading a file does not transmit it; data leaves the browser only when **Submit to Import Queue** is selected.
+Files are limited to 8 MiB and 5,000 rows in the extension so they fit the plugin's default payload limit. Loading a file does not transmit it; data leaves the browser only when **Submit to Import Queue** is selected.
 
 ## Exporter profiles
 

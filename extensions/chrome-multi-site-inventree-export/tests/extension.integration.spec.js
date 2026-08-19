@@ -589,7 +589,7 @@ test("captures Fastenal list pages and supports selective linked-page import", a
   await popup.selectOption("#captureProfile", "list-details");
 
   const supplier = await context.newPage();
-  await supplier.goto("https://www.fastenal.com/product/Fasteners/Sockets/Socket%20Head%20Cap%20Screws?productFamilyId=30891&categoryId=600040");
+  await supplier.goto("https://www.fastenal.com/product/Fasteners/Sockets/Socket%20Head%20Cap%20Screws");
   await supplier.bringToFront();
 
   await popup.bringToFront();
@@ -618,4 +618,43 @@ test("captures Fastenal list pages and supports selective linked-page import", a
   await supplier.close();
   await popup.close();
   await context.unroute("https://www.fastenal.com/**");
+});
+
+test("does not auto-detect unrelated Fastenal-like hosts", async () => {
+  await context.route("https://notfastenal.com/**", async (route) => {
+    await route.fulfill({ contentType: "text/html", body: `
+      <html><body><main>
+        <h1>Not Fastenal</h1>
+        <a href="/product/detail/111111">Decoy item</a>
+      </main></body></html>
+    ` });
+  });
+
+  const popup = await openPopup();
+  await popup.selectOption("#sourceMode", "auto");
+  await popup.selectOption("#captureProfile", "single-item");
+
+  const page = await context.newPage();
+  await page.goto("https://notfastenal.com/product/detail/111111");
+  await page.bringToFront();
+
+  const targetTabId = await popup.evaluate(() =>
+    chrome.tabs.query({}).then((tabs) =>
+      tabs.find((tab) => tab.url?.includes("notfastenal.com/product/detail/111111"))?.id
+    )
+  );
+  const response = await popup.evaluate((tabId) =>
+    chrome.runtime.sendMessage({
+      type: "capturePage",
+      settings: { sourceMode: "auto", captureProfile: "single-item" },
+      targetTabId: tabId
+    }), targetTabId
+  );
+
+  expect(response.ok).toBe(false);
+  expect(response.error).toContain("Unsupported page");
+
+  await page.close();
+  await popup.close();
+  await context.unroute("https://notfastenal.com/**");
 });

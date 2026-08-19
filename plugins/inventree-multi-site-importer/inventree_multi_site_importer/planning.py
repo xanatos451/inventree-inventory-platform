@@ -199,6 +199,8 @@ def build_import_plan(
                 stock_locations = _call_lookup(location_lookup, stock_location)
                 if len(stock_locations) != 1:
                     errors.append("Stock location is missing or ambiguous.")
+                elif bool(stock_locations[0].get("structural")):
+                    errors.append("Stock location cannot be structural.")
 
         matched_part_ids = {match.get("pk") for match in existing_parts if match.get("pk") is not None}
         matched_part_ids.update(
