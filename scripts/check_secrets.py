@@ -9,7 +9,8 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 EXCLUDED_PARTS = {
-    ".git", ".artifacts", "node_modules", "__pycache__", "build", "dist",
+    ".git", ".artifacts", ".venv", "venv", ".tox", ".nox",
+    "node_modules", "__pycache__", "build", "dist",
     "playwright-report", "test-results",
 }
 SENSITIVE_NAMES = re.compile(
