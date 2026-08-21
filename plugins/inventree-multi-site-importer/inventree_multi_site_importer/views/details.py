@@ -1,3 +1,5 @@
+"""Populates notes, parameters, and images on parts that already exist (a separate confirmed stage after creation.py)."""
+
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView

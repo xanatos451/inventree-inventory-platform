@@ -1,3 +1,4 @@
+// Builds the raw JSON/CSV export payloads sent to the plugin or downloaded locally.
 export function buildExportFilename(format) {
   const ts = new Date().toISOString().replace(/[:]/g, "-").replace(/\..+$/, "");
   return `product-inventory-export/${ts}-captured-catalog.${format}`;

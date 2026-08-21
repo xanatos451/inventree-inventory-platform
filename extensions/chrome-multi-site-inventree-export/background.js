@@ -1,3 +1,4 @@
+// Service worker entry point: wires chrome.runtime listeners to the feature modules under background/.
 import {
   CAPTURE_PROGRESS_KEY,
   DEFAULT_SETTINGS,

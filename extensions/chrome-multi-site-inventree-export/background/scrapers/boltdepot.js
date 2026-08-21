@@ -1,4 +1,6 @@
-export function scrapeBoltDepotPageData() {
+export // Injected into the active Bolt Depot tab via chrome.scripting.executeScript; must stay self-contained
+// (no closures over background-script state - it runs in the page's own execution context).
+function scrapeBoltDepotPageData() {
   function normalizeText(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
   }

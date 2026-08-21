@@ -1,3 +1,4 @@
+// Parses a user-imported CSV/JSON dataset file into a capture object (bypasses page scraping).
 function parseImportedCsv(text) {
   const records = [];
   let record = [];

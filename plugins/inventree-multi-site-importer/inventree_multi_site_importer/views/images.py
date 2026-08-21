@@ -1,3 +1,5 @@
+"""Prefetches and caches mapped product images for a capture before detail import."""
+
 from datetime import timedelta
 
 from rest_framework import generics, permissions, status

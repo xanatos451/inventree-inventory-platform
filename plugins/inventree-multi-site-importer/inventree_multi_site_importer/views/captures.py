@@ -1,3 +1,5 @@
+"""Capture browsing, field inspection, dataset paging, and capture admin (pin/cleanup)."""
+
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView

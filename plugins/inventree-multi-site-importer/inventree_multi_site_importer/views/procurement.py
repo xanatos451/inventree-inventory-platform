@@ -1,3 +1,5 @@
+"""Supplier/manufacturer record sync and stock-item creation; both run only after parts already exist."""
+
 from rest_framework import permissions
 from rest_framework.response import Response
 from rest_framework.views import APIView

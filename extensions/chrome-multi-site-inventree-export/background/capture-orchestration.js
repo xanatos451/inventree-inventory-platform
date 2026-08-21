@@ -1,3 +1,7 @@
+// Dispatches capture/preview requests to the right site module and holds the shared
+// tab/scrape helpers they all use. Imports from site-captures.js, which imports back
+// from here (executeScraperOnTab, waitForTabLoaded, etc.) - safe circular import since
+// every reference is only used inside async function bodies, never at module load.
 import { captureAmazonTab, captureBoltDepotTab, captureFastenalTab, captureMcmasterTab } from "./site-captures.js";
 import { scrapeAmazonOrderItems } from "./scrapers/amazon.js";
 import { scrapeBoltDepotPageData } from "./scrapers/boltdepot.js";

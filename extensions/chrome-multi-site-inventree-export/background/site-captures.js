@@ -1,3 +1,5 @@
+// Per-site capture orchestrators (McMaster, Bolt Depot, Amazon, Fastenal). Imports shared
+// tab/scrape helpers back from capture-orchestration.js - see the circular-import note there.
 import {
   dedupeRows,
   executeScraperOnTab,

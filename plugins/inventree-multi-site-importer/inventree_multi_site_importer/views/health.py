@@ -1,3 +1,5 @@
+"""Plugin health/contract-version check used by the browser extension."""
+
 from rest_framework import generics, permissions
 from rest_framework.response import Response
 

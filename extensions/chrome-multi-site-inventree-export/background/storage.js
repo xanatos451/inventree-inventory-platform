@@ -1,3 +1,4 @@
+// Extension settings, capture-progress state, and their chrome.storage.local keys.
 export const DEFAULT_SETTINGS = {
   inventreeUrl: "",
   inventreeToken: "",

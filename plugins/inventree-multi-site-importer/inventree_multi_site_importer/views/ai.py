@@ -1,3 +1,5 @@
+"""AI-assisted normalization, candidate matching, and dynamic-learning decision endpoints."""
+
 import re
 
 from rest_framework import generics, permissions, status

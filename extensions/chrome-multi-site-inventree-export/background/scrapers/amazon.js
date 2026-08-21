@@ -1,3 +1,6 @@
+// Injected into the active Amazon tab via chrome.scripting.executeScript; must stay self-contained
+// (no closures over background-script state - it runs in the page's own execution context).
+
 // Injected into the active Amazon tab to collect order item links.
 export function scrapeAmazonOrderItems() {
   function normalizeText(value) {

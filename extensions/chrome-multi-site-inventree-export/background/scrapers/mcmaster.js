@@ -1,3 +1,5 @@
+// Injected into the active McMaster-Carr tab via chrome.scripting.executeScript; must stay self-contained
+// (no closures over background-script state - it runs in the page's own execution context).
 export function scrapeMcMasterCategoryData() {
   function normalizeText(value) {
     let text = String(value || "");

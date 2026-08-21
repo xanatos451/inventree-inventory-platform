@@ -1,3 +1,5 @@
+"""Read-only import plan preview against live InvenTree part/category/supplier identifiers."""
+
 from rest_framework import generics, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
