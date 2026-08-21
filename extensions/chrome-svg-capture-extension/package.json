@@ -1,0 +1,13 @@
+{
+  "name": "chrome-svg-capture-extension",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Lint tooling for the SVG capture utility extension",
+  "scripts": {
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "eslint": "^10.9.0",
+    "globals": "^17.11.0"
+  }
+}

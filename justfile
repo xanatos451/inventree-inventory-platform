@@ -14,6 +14,7 @@ plugin_dir := "plugins/inventree-multi-site-importer"
 extension-install:
 	Set-Location "{{ext_dir}}"; npm ci
 	Set-Location "{{ext_dir}}"; npx playwright install chromium
+	Set-Location "{{svg_ext_dir}}"; npm ci
 
 # Run extension JavaScript syntax checks.
 extension-syntax:
@@ -21,6 +22,7 @@ extension-syntax:
 	Set-Location "{{ext_dir}}"; npm run lint
 	node --check "{{svg_ext_dir}}/background.js"
 	node --check "{{svg_ext_dir}}/popup.js"
+	Set-Location "{{svg_ext_dir}}"; npm run lint
 
 # Run extension integration tests.
 extension-test:
