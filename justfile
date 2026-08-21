@@ -18,6 +18,7 @@ extension-install:
 # Run extension JavaScript syntax checks.
 extension-syntax:
 	Set-Location "{{ext_dir}}"; npm run test:syntax
+	Set-Location "{{ext_dir}}"; npm run lint
 	node --check "{{svg_ext_dir}}/background.js"
 	node --check "{{svg_ext_dir}}/popup.js"
 
