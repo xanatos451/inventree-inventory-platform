@@ -10,26 +10,17 @@ This file defines repository standards for AI coding agents.
 
 ## Project Structure
 
-- `extensions/chrome-multi-site-inventree-export`: primary capture extension.
-- `extensions/chrome-svg-capture-extension`: SVG capture utility extension.
-- `plugins/inventree-multi-site-importer`: InvenTree importer plugin.
-- `scripts`: repo-level maintenance scripts.
+Component-scoped rules and validation commands auto-attach from `.github/instructions/` when a file in that component is edited; consult them directly if you need the full detail without editing first.
 
-## Required Validation by Scope
+- `extensions/chrome-multi-site-inventree-export`: primary capture extension. See [.github/instructions/extension-capture.instructions.md](.github/instructions/extension-capture.instructions.md).
+- `extensions/chrome-svg-capture-extension`: SVG capture utility extension. See [.github/instructions/extension-svg-capture.instructions.md](.github/instructions/extension-svg-capture.instructions.md).
+- `plugins/inventree-multi-site-importer`: InvenTree importer plugin. See [.github/instructions/plugin-importer.instructions.md](.github/instructions/plugin-importer.instructions.md).
+- `scripts`: repo-level maintenance scripts. See [.github/instructions/scripts.instructions.md](.github/instructions/scripts.instructions.md).
 
-- For `extensions/chrome-multi-site-inventree-export` changes:
-  - `just extension-syntax`
-  - `just extension-test`
-- For `extensions/chrome-svg-capture-extension` changes:
-  - `just extension-syntax`
-- For `plugins/inventree-multi-site-importer` changes:
-  - `just plugin-test`
-  - `just plugin-compile`
-  - `just plugin-build`
-- For mixed changes or shared tooling updates:
-  - `just check`
+## Validation
 
-Use `just ci` on first setup when dependencies are missing.
+- Mixed changes, shared tooling updates, or uncertain scope: `just check`.
+- Use `just ci` on first setup when dependencies are missing.
 
 ## Rules and Boundaries
 
