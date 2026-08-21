@@ -38,6 +38,7 @@ REQUIRED_WHEEL_FILES = {
     "inventree_multi_site_importer/management/commands/cleanup_multi_site_importer.py",
     "inventree_multi_site_importer/templates/inventree_multi_site_importer/capture_workspace.html",
     "inventree_multi_site_importer/static/part_image_gallery.js",
+    "inventree_multi_site_importer/static/capture_workspace.js",
 }
 
 

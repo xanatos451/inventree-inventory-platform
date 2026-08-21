@@ -77,8 +77,16 @@ class PluginLoadingTests(unittest.TestCase):
             / "inventree_multi_site_importer"
             / "capture_workspace.html"
         ).read_text(encoding="utf-8")
+        workspace_js = (
+            root
+            / "inventree_multi_site_importer"
+            / "static"
+            / "capture_workspace.js"
+        ).read_text(encoding="utf-8")
         urls = (root / "inventree_multi_site_importer" / "urls.py").read_text(encoding="utf-8")
         serializers = (root / "inventree_multi_site_importer" / "serializers.py").read_text(encoding="utf-8")
+        self.assertIn("{% load static %}", template)
+        self.assertIn("{% static 'capture_workspace.js' %}", template)
         for control in (
             'id="standardRules"',
             'id="parameterRules"',
@@ -99,11 +107,11 @@ class PluginLoadingTests(unittest.TestCase):
             'id="imagePrefetchResult"',
             'id="saveProfileBtn"',
             'id="profileSelect"',
-            'class="rule-mode"',
-            'class="rule-template"',
             'json_script:"source-fields-data"',
         ):
             self.assertIn(control, template)
+        for control in ('class="rule-mode"', 'class="rule-template"'):
+            self.assertIn(control, workspace_js)
         self.assertIn('path("mapping-profiles/<int:pk>/"', urls)
         self.assertIn('path("captures/<int:pk>/plan/"', urls)
         self.assertIn('path("captures/<int:pk>/categories/"', urls)
@@ -113,21 +121,21 @@ class PluginLoadingTests(unittest.TestCase):
         self.assertIn('path("captures/<int:pk>/details/"', urls)
         self.assertIn('path("captures/<int:pk>/images/prefetch/"', urls)
         self.assertIn('path("captures/<int:pk>/images/exclude-failures/"', urls)
-        self.assertIn("selected_row_indices:selectedRowsPayload()", template)
-        self.assertIn("existing_part_mode:existingPartMode", template)
-        self.assertIn("lastPlan.detail_import_image_limit", template)
-        self.assertIn("Importing Batch ${index + 1}/${batches.length}", template)
+        self.assertIn("selected_row_indices:selectedRowsPayload()", workspace_js)
+        self.assertIn("existing_part_mode:existingPartMode", workspace_js)
+        self.assertIn("lastPlan.detail_import_image_limit", workspace_js)
+        self.assertIn("Importing Batch ${index + 1}/${batches.length}", workspace_js)
         views_source = _views_source(root)
         self.assertIn('"detail_import_image_limit": image_limit', views_source)
         self.assertIn('request.data.get("existing_part_mode") or "update"', views_source)
         self.assertIn("download_remote_image(", views_source)
-        self.assertIn("cached_images_used", template)
-        self.assertIn("explicitly excluded", template)
-        self.assertIn("Verification succeeded: all mapped category paths now exist.", template)
-        self.assertIn("The server will rebuild the live plan before writing.", template)
+        self.assertIn("cached_images_used", workspace_js)
+        self.assertIn("explicitly excluded", workspace_js)
+        self.assertIn("Verification succeeded: all mapped category paths now exist.", workspace_js)
+        self.assertIn("The server will rebuild the live plan before writing.", workspace_js)
         self.assertIn("part.full_clean()", views_source)
-        self.assertIn('key === "image_url" ? imagePreview(item[key])', template)
-        self.assertIn('referrerpolicy="no-referrer"', template)
+        self.assertIn('key === "image_url" ? imagePreview(item[key])', workspace_js)
+        self.assertIn('referrerpolicy="no-referrer"', workspace_js)
         self.assertIn("def validate_rules", serializers)
 
     def test_part_image_gallery_panel_and_static_asset_are_packaged(self):
