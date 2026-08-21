@@ -28,7 +28,16 @@ REQUIRED_WHEEL_FILES = {
     "inventree_multi_site_importer/planning.py",
     "inventree_multi_site_importer/migrations/0001_initial.py",
     "inventree_multi_site_importer/migrations/0002_capture_profiles.py",
+    "inventree_multi_site_importer/migrations/0003_alter_captureimport_id_alter_mappingprofile_id.py",
+    "inventree_multi_site_importer/migrations/0004_imageprefetch.py",
+    "inventree_multi_site_importer/migrations/0005_stockimportrecord.py",
+    "inventree_multi_site_importer/migrations/0005_alter_captureimport_id_alter_imageprefetch_id_and_more.py",
+    "inventree_multi_site_importer/migrations/0006_capture_retention.py",
+    "inventree_multi_site_importer/migrations/0007_merge_0005_generated_0006_capture_retention.py",
+    "inventree_multi_site_importer/cleanup.py",
+    "inventree_multi_site_importer/management/commands/cleanup_multi_site_importer.py",
     "inventree_multi_site_importer/templates/inventree_multi_site_importer/capture_workspace.html",
+    "inventree_multi_site_importer/static/part_image_gallery.js",
 }
 
 

@@ -1,8 +1,48 @@
 """Dependency-free checks for the documented capture contract."""
 
-import unittest
 import importlib.util
+import sys
+import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+try:
+    import django
+    from django.conf import settings
+except ModuleNotFoundError:  # pragma: no cover - exercised in lightweight environments
+    django = None
+    settings = None
+
+if django is not None and settings is not None and not settings.configured:
+    settings.configure(
+        SECRET_KEY="test",
+        INSTALLED_APPS=[
+            "django.contrib.auth",
+            "django.contrib.contenttypes",
+            "rest_framework",
+            "inventree_multi_site_importer",
+        ],
+        DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
+        AUTH_USER_MODEL="auth.User",
+        ROOT_URLCONF="inventree_multi_site_importer.urls",
+        USE_TZ=True,
+    )
+    django.setup()
+
+try:
+    from rest_framework import status
+    from rest_framework.test import APIRequestFactory
+except ModuleNotFoundError:  # pragma: no cover - exercised in lightweight environments
+    status = None
+    APIRequestFactory = None
+
+sys.path.insert(0, str(Path(__file__).parents[1]))
+
+if django is not None and settings is not None:
+    import inventree_multi_site_importer.views as views
+else:
+    views = None
 
 _mapping_spec = importlib.util.spec_from_file_location(
     "supplier_mapping",
@@ -29,6 +69,33 @@ _planning = importlib.util.module_from_spec(_planning_spec)
 _planning_spec.loader.exec_module(_planning)
 build_import_plan = _planning.build_import_plan
 
+_selection_spec = importlib.util.spec_from_file_location(
+    "supplier_selection",
+    Path(__file__).parents[1] / "inventree_multi_site_importer" / "selection.py",
+)
+_selection = importlib.util.module_from_spec(_selection_spec)
+_selection_spec.loader.exec_module(_selection)
+select_capture_rows = _selection.select_capture_rows
+
+_remote_images_spec = importlib.util.spec_from_file_location(
+    "supplier_remote_images",
+    Path(__file__).parents[1] / "inventree_multi_site_importer" / "remote_images.py",
+)
+_remote_images = importlib.util.module_from_spec(_remote_images_spec)
+_remote_images_spec.loader.exec_module(_remote_images)
+RemoteImageError = _remote_images.RemoteImageError
+validate_remote_url = _remote_images.validate_remote_url
+
+_ai_assistant_spec = importlib.util.spec_from_file_location(
+    "supplier_ai_assistant",
+    Path(__file__).parents[1] / "inventree_multi_site_importer" / "ai_assistant.py",
+)
+_ai_assistant = importlib.util.module_from_spec(_ai_assistant_spec)
+_ai_assistant_spec.loader.exec_module(_ai_assistant)
+normalize_captured_row = _ai_assistant.normalize_captured_row
+build_candidate_matches = _ai_assistant.build_candidate_matches
+score_candidate_part = _ai_assistant.score_candidate_part
+
 
 def validate_capture(payload):
     required = ("contract_version", "capture_profile", "source", "captured_at", "page_url", "headers", "rows")
@@ -41,7 +108,215 @@ def validate_capture(payload):
         raise ValueError("rows must be a non-empty list")
 
 
+REQUIRES_DJANGO_DRF = unittest.skipUnless(
+    django is not None and settings is not None and views is not None and APIRequestFactory is not None and status is not None,
+    "Django/DRF is not available in this test environment",
+)
+
+
 class CaptureContractTests(unittest.TestCase):
+    @REQUIRES_DJANGO_DRF
+    def test_ai_normalize_endpoint_returns_normalized_rows(self):
+        fake_capture = SimpleNamespace(
+            pk=21,
+            source="fastenal",
+            profile_id=None,
+            payload={"rows": [{"Product": "Socket Head Cap Screw"}]},
+        )
+        expected_items = [{
+            "capture_id": 21,
+            "row_index": 0,
+            "canonical": {"type": "socket-head-cap-screw"},
+            "identity": {"product_name": "Socket Head Cap Screw"},
+        }]
+
+        with patch.object(views, "_capture_or_404", return_value=fake_capture), patch.object(views, "_normalized_capture_items", return_value=expected_items):
+            request = APIRequestFactory().post("/captures/21/ai/normalize/", data={}, format="json")
+            request.user = SimpleNamespace(is_authenticated=True, is_staff=False, is_active=True)
+            response = views.CaptureNormalizeView.as_view()(request, pk=21)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["capture_id"], 21)
+        self.assertEqual(response.data["row_count"], 1)
+        self.assertEqual(response.data["items"], expected_items)
+
+    @REQUIRES_DJANGO_DRF
+    def test_ai_candidates_endpoint_returns_ranked_matches(self):
+        fake_capture = SimpleNamespace(
+            pk=22,
+            source="fastenal",
+            profile_id=None,
+            payload={"rows": [{"Product": "Socket Head Cap Screw"}]},
+        )
+        expected_items = [{
+            "capture_id": 22,
+            "row_index": 0,
+            "canonical": {"type": "socket-head-cap-screw"},
+            "identity": {"product_name": "Socket Head Cap Screw"},
+        }]
+        ranked_matches = [{"part_id": 7, "score": 0.91, "part_name": "Socket Head Cap Screw"}]
+
+        with patch.object(views, "_capture_or_404", return_value=fake_capture), patch.object(views, "_normalized_capture_items", return_value=expected_items), patch.object(views, "_candidate_parts_for_item", return_value=[{"pk": 7, "name": "Socket Head Cap Screw", "IPN": "SCR-1"}]), patch.object(views, "build_candidate_matches", return_value=ranked_matches):
+            request = APIRequestFactory().post("/captures/22/ai/candidates/", data={"limit": 3}, format="json")
+            request.user = SimpleNamespace(is_authenticated=True, is_staff=False, is_active=True)
+            response = views.CaptureCandidatesView.as_view()(request, pk=22)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["capture_id"], 22)
+        self.assertEqual(response.data["row_count"], 1)
+        self.assertEqual(response.data["items"][0]["candidates"], ranked_matches)
+
+    @REQUIRES_DJANGO_DRF
+    def test_ai_decisions_endpoint_persists_feedback_summary(self):
+        fake_capture = SimpleNamespace(pk=23, source="fastenal", profile_id=None, payload={"rows": []})
+        summary = {"processed": 2, "learned_updates": 1}
+
+        with patch.object(views, "_capture_or_404", return_value=fake_capture), patch.object(views, "_process_ai_decisions", return_value=summary):
+            request = APIRequestFactory().post(
+                "/captures/23/ai/decisions/",
+                data={
+                    "decisions": [
+                        {
+                            "action": "accepted",
+                            "category": "material",
+                            "term": "Alloy Steel",
+                            "canonical": "alloy-steel",
+                        }
+                    ]
+                },
+                format="json",
+            )
+            request.user = SimpleNamespace(is_authenticated=True, is_staff=False, is_active=True)
+            response = views.CaptureDecisionsView.as_view()(request, pk=23)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data["capture_id"], 23)
+        self.assertEqual(response.data["processed"], 2)
+        self.assertEqual(response.data["learned_updates"], 1)
+
+    def test_ai_normalization_extracts_fastener_canonical_attributes(self):
+        normalized = normalize_captured_row(
+            {
+                "Product": "Socket Head Cap Screw",
+                "Description": "M6 x 1.0 x 25 mm Alloy Steel Black Oxide",
+                "FastenalPartNumber": "FAS-M6-01",
+            },
+            {
+                "part.name": "Socket Head Cap Screw",
+                "supplier.sku": "FAS-M6-01",
+            },
+            source="fastenal",
+            capture_id=77,
+            row_index=3,
+        )
+        canonical = normalized["canonical"]
+        self.assertEqual(canonical["type"], "socket-head-cap-screw")
+        self.assertEqual(canonical["thread"], "m6x1.0")
+        self.assertEqual(canonical["length_mm"], 25.0)
+        self.assertEqual(canonical["material"], "alloy-steel")
+        self.assertEqual(canonical["finish"], "black-oxide")
+        self.assertIn("m6x1.0", canonical["fingerprint"])
+
+    def test_ai_normalization_uses_dynamic_keyword_overrides(self):
+        normalized = normalize_captured_row(
+            {
+                "Product": "Hex Bolt",
+                "Description": "A286 bolt with torx recess",
+            },
+            {},
+            source="custom",
+            dynamic_keywords={
+                "material": {"a286": "a286"},
+                "drive": {"torx recess": "torx"},
+            },
+        )
+
+        canonical = normalized["canonical"]
+        self.assertEqual(canonical["material"], "a286")
+        self.assertEqual(canonical["drive"], "torx")
+
+    def test_ai_candidate_matching_prefers_closest_part(self):
+        incoming = normalize_captured_row(
+            {
+                "Product": "Socket Head Cap Screw",
+                "Description": "M6 x 1.0 x 25 mm Alloy Steel",
+            },
+            {"part.name": "Socket Head Cap Screw", "part.ipn": ""},
+            source="capture",
+        )
+        candidates = [
+            {
+                "pk": 1,
+                "IPN": "SCR-M6-25-SHCS",
+                "name": "Socket Head Cap Screw M6 x 1.0 x 25 mm",
+                "description": "Alloy steel hex socket",
+            },
+            {
+                "pk": 2,
+                "IPN": "SCR-M8-30-SHCS",
+                "name": "Socket Head Cap Screw M8 x 1.25 x 30 mm",
+                "description": "Stainless steel",
+            },
+        ]
+        ranked = build_candidate_matches(incoming, candidates, limit=2, min_score=0.0)
+        self.assertEqual(len(ranked), 2)
+        self.assertGreater(ranked[0]["score"], ranked[1]["score"])
+        self.assertEqual(ranked[0]["part_id"], 1)
+
+    def test_ai_candidate_scoring_does_not_double_count_exact_ipn(self):
+        incoming = normalize_captured_row(
+            {
+                "Product": "Socket Head Cap Screw",
+                "Description": "M6 x 1.0 x 25 mm Alloy Steel Hex Socket",
+            },
+            {"part.name": "Socket Head Cap Screw", "part.ipn": "SCR-M6-25-SHCS"},
+            source="capture",
+        )
+
+        with patch.object(_ai_assistant, "_score_text_similarity", return_value=0.0):
+            scored = score_candidate_part(
+                incoming,
+                {
+                    "pk": 1,
+                    "IPN": "SCR-M6-25-SHCS",
+                    "name": "Socket Head Cap Screw M6 x 1.0 x 25 mm",
+                    "description": "Alloy Steel Hex Socket",
+                },
+            )
+
+        self.assertIn("ipn_exact", scored["exact"])
+        self.assertEqual(
+            len([field for field in scored["exact"] if field.startswith("canonical.")]),
+            5,
+        )
+        self.assertEqual(scored["score"], 0.825)
+
+    def test_remote_image_url_requires_public_http_address(self):
+        public = lambda *_args: [(2, 1, 6, "", ("93.184.216.34", 443))]
+        private = lambda *_args: [(2, 1, 6, "", ("127.0.0.1", 80))]
+        self.assertEqual(
+            validate_remote_url("https://images.example.test/item.jpg", resolver=public),
+            "https://images.example.test/item.jpg",
+        )
+        with self.assertRaisesRegex(RemoteImageError, "non-public"):
+            validate_remote_url("http://localhost/item.jpg", resolver=private)
+        with self.assertRaisesRegex(RemoteImageError, "HTTP or HTTPS"):
+            validate_remote_url("file:///tmp/item.jpg", resolver=public)
+
+    def test_dataset_selection_preserves_original_row_indices(self):
+        rows = [{"Part": "A"}, {"Part": "B"}, {"Part": "C"}]
+        self.assertEqual(
+            select_capture_rows(rows, [2, 0, 2]),
+            [(2, {"Part": "C"}), (0, {"Part": "A"})],
+        )
+        self.assertEqual(select_capture_rows(rows, []), [])
+
+    def test_dataset_selection_rejects_invalid_indices(self):
+        with self.assertRaisesRegex(ValueError, "outside the dataset"):
+            select_capture_rows([{"Part": "A"}], [1])
+        with self.assertRaisesRegex(ValueError, "must be an integer"):
+            select_capture_rows([{"Part": "A"}], [True])
+
     def test_minimum_capture(self):
         validate_capture({
             "contract_version": "1.0",
@@ -78,6 +353,36 @@ class CaptureContractTests(unittest.TestCase):
         )
         self.assertEqual(mapped["parameter.Thread Size"], "M3")
         self.assertEqual(mapped["parameter.Length"], "4 mm")
+
+    def test_mapping_profile_normalizes_product_image_gallery(self):
+        mapped = map_row(
+            {
+                "Image URL": "https://images.example.test/primary.jpg",
+                "Image URLs": (
+                    "https://images.example.test/side.jpg\n"
+                    "https://images.example.test/primary.jpg\n"
+                    "https://images.example.test/package.jpg"
+                ),
+            },
+            {
+                "image_url": {"source_field": "Image URL", "regex": ""},
+                "image_urls": {"source_field": "Image URLs", "regex": ""},
+            },
+        )
+        self.assertEqual(mapped["image_url"], "https://images.example.test/primary.jpg")
+        self.assertEqual(mapped["image_urls"], [
+            "https://images.example.test/primary.jpg",
+            "https://images.example.test/side.jpg",
+            "https://images.example.test/package.jpg",
+        ])
+
+    def test_mapping_profile_promotes_first_gallery_image_to_primary(self):
+        mapped = map_row(
+            {"Image URLs": '["https://images.example.test/front.jpg", "https://images.example.test/back.jpg"]'},
+            {"image_urls": {"source_field": "Image URLs", "regex": ""}},
+        )
+        self.assertEqual(mapped["image_url"], "https://images.example.test/front.jpg")
+        self.assertEqual(len(mapped["image_urls"]), 2)
 
     def test_mapping_profile_combines_multiple_source_fields(self):
         mapped = map_row(
@@ -120,6 +425,15 @@ class CaptureContractTests(unittest.TestCase):
         self.assertEqual(plan["summary"]["update"], 1)
         self.assertEqual(plan["summary"]["error"], 1)
 
+    def test_import_plan_retains_selected_capture_row_index(self):
+        plan = build_import_plan([{
+            "_capture_row_index": 41,
+            "part_number": "SELECTED-1",
+            "name": "Selected Part",
+        }])
+        self.assertEqual(plan["rows"][0]["row_index"], 41)
+        self.assertNotIn("_capture_row_index", plan["rows"][0]["mapped"])
+
     def test_import_plan_marks_duplicate_identifiers_as_conflicts(self):
         plan = build_import_plan([
             {"part_number": "DUP-1", "name": "One", "category": "Fastening"},
@@ -127,6 +441,56 @@ class CaptureContractTests(unittest.TestCase):
         ])
         self.assertEqual(plan["summary"]["conflict"], 2)
         self.assertTrue(all(row["errors"] for row in plan["rows"]))
+
+    def test_import_plan_rejects_structural_stock_locations(self):
+        plan = build_import_plan(
+            [{
+                "part.ipn": "STOCK-1",
+                "part.name": "Part With Structural Stock",
+                "part.category": "Fastening",
+                "stock.quantity": "5",
+                "stock.location": "Upper Rack",
+            }],
+            location_lookup=lambda _name: [{"pk": 4, "name": "Upper Rack", "structural": True}],
+        )
+        row = plan["rows"][0]
+        self.assertFalse(plan["ready"])
+        self.assertEqual(row["action"], "error")
+        self.assertIn("Stock location cannot be structural.", row["errors"])
+
+    def test_import_plan_preserves_and_validates_product_image_gallery(self):
+        plan = build_import_plan([{
+            "part_number": "IMG-1",
+            "name": "Part With Gallery",
+            "category": "Fastening",
+            "image_urls": [
+                "https://images.example.test/front.jpg",
+                "https://images.example.test/front.jpg",
+                "https://images.example.test/side.jpg",
+            ],
+        }])
+        row = plan["rows"][0]
+        self.assertEqual(row["image_url"], "https://images.example.test/front.jpg")
+        self.assertEqual(row["image_count"], 2)
+        self.assertEqual(row["image_urls"], [
+            "https://images.example.test/front.jpg",
+            "https://images.example.test/side.jpg",
+        ])
+        self.assertEqual(row["mapped"]["image_urls"], row["image_urls"])
+        self.assertEqual(row["action"], "create")
+
+        invalid = build_import_plan([{
+            "part_number": "IMG-2",
+            "name": "Part With Unsafe Gallery",
+            "category": "Fastening",
+            "image_url": "https://images.example.test/front.jpg",
+            "image_urls": "https://images.example.test/front.jpg\nfile:///unsafe.png",
+        }])
+        self.assertEqual(invalid["rows"][0]["action"], "error")
+        self.assertIn(
+            "Product image URL #2 must use HTTP or HTTPS.",
+            invalid["rows"][0]["errors"],
+        )
 
     def test_import_plan_requires_an_unambiguous_category_path(self):
         item = {"part_number": "NEW-1", "name": "New Part", "category": "Fastening"}
@@ -189,6 +553,41 @@ class CaptureContractTests(unittest.TestCase):
         self.assertEqual(result["match_count"], 1)
         self.assertEqual(result["rows"][0]["row_index"], 0)
         self.assertEqual(result["rows"][0]["context"], {"Part": "A1"})
+
+    def test_namespaced_part_mapping_keeps_legacy_import_compatibility(self):
+        mapped = map_row(
+            {"sku": "ABC", "images": "https://example.com/a.jpg"},
+            {
+                "part.ipn": {"source_field": "sku"},
+                "part.image_urls": {"source_field": "images"},
+            },
+        )
+        self.assertEqual(mapped["part.ipn"], "ABC")
+        self.assertEqual(mapped["part_number"], "ABC")
+        self.assertEqual(mapped["image_url"], "https://example.com/a.jpg")
+
+    def test_plan_separates_procurement_and_stock_identity(self):
+        plan = build_import_plan(
+            [{
+                "part.ipn": "M5-10", "part.name": "M5 insert",
+                "supplier.company": "Supplier A", "supplier.sku": "SKU-7",
+                "manufacturer.company": "Maker A", "manufacturer.mpn": "MPN-9",
+                "stock.quantity": "25", "stock.location": "Bin 4",
+            }],
+            part_lookup=lambda _ipn: [{"pk": 1}],
+            supplier_lookup=lambda company, sku: (
+                [{"pk": 2, "part_id": 1}]
+                if (company, sku) == ("Supplier A", "SKU-7") else []
+            ),
+            company_lookup=lambda name, role: [{"pk": 3, "name": name}],
+            manufacturer_lookup=lambda company, mpn: [],
+            location_lookup=lambda name: [{"pk": 4, "name": name}],
+        )
+        row = plan["rows"][0]
+        self.assertTrue(plan["ready"])
+        self.assertEqual(row["supplier_action"], "update")
+        self.assertEqual(row["manufacturer_action"], "create")
+        self.assertEqual(row["stock_action"], "create-disabled")
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ where = ["."]
 include = ["inventree_multi_site_importer*"]
 
 [tool.setuptools.package-data]
-inventree_multi_site_importer = ["templates/**/*.html"]
+inventree_multi_site_importer = ["templates/**/*.html", "static/**/*.js"]
 
 [tool.setuptools.dynamic]
 version = { attr = "inventree_multi_site_importer.PLUGIN_VERSION" }

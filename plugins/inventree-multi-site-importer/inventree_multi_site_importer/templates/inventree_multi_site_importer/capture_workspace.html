@@ -27,11 +27,14 @@
     .rule-row output { min-height:36px; max-height:86px; overflow:auto; padding:8px; border:1px solid var(--border); border-radius:6px; background:#f8fafb; white-space:pre-wrap; overflow-wrap:anywhere; }
     .status { display:none; border-radius:6px; margin-top:10px; padding:9px; background:#e8f3f7; }
     .status.visible { display:block; } .status.ok { background:#e8f6ed; color:#236738; } .status.error { background:#fdebea; color:#8a241e; }
-    #categoryCreationResult { white-space:pre-wrap; }
+    #categoryCreationResult, #partCreationResult, #detailImportResult, #imagePrefetchResult { white-space:pre-wrap; }
     .preview-wrap { overflow:auto; max-height:500px; }
     .image-preview { display:grid; gap:5px; min-width:130px; }
     .image-preview img { width:120px; height:90px; object-fit:contain; border:1px solid var(--border); border-radius:5px; background:white; }
     .image-preview a { max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .image-gallery-preview { display:flex; flex-wrap:wrap; gap:8px; min-width:280px; align-items:flex-start; }
+    .image-gallery-preview .image-preview { min-width:90px; }
+    .image-gallery-preview .image-preview img { width:88px; height:66px; }
     table { width:100%; border-collapse:collapse; margin:12px 0; }
     th, td { border:1px solid var(--border); padding:7px; text-align:left; vertical-align:top; }
     th { background:var(--head); position:sticky; top:0; z-index:1; }
@@ -55,10 +58,45 @@
   data-source="{{ capture.source }}"
   data-capture-profile="{{ capture.capture_profile }}"
   data-page-type="{{ capture.page_type }}"
+  data-row-count="{{ capture.row_count }}"
+  data-pinned="{{ capture.pinned|yesno:'true,false' }}"
 >
   {% csrf_token %}
   <h1>Capture #{{ capture.pk }} mapping workspace</h1>
   <div class="meta">{{ capture.source }} · {{ capture.capture_profile }} · {{ capture.page_type }} · {{ capture.row_count }} rows · {{ capture.page_title }}</div>
+
+  {% if request.user.is_staff %}
+  <details class="panel">
+    <summary>Capture retention and cleanup</summary>
+    <p class="hint">Only unpinned captures with no recorded Part, detail/image, supplier/manufacturer, or stock writes are eligible. Imported inventory is never deleted.</p>
+    <div class="actions">
+      <button id="refreshCleanupBtn" class="secondary" type="button">Refresh Eligible Captures</button>
+      <button id="pinCurrentCaptureBtn" class="secondary" type="button">{{ capture.pinned|yesno:"Unpin,Pin" }} Current Capture</button>
+      <button id="clearSelectedPrefetchBtn" class="danger" type="button" disabled>Clear Selected Prefetch Cache</button>
+      <button id="deleteSelectedCapturesBtn" class="danger" type="button" disabled>Delete Selected Captures &amp; Cache</button>
+    </div>
+    <div id="cleanupResult" class="status" role="status" aria-live="polite"></div>
+    <div id="cleanupTable" class="preview-wrap"></div>
+  </details>
+  {% endif %}
+
+  <section class="panel">
+    <h2>Select dataset rows</h2>
+    <p class="hint">Choose the rows included in preview, planning, category creation, and part creation. The stored capture is not modified.</p>
+    <div class="actions">
+      <button id="selectAllRowsBtn" type="button">Select All</button>
+      <button id="deselectAllRowsBtn" class="secondary" type="button">Deselect All</button>
+      <button id="selectPageRowsBtn" class="secondary" type="button">Select Visible</button>
+      <button id="deselectPageRowsBtn" class="secondary" type="button">Deselect Visible</button>
+      <span id="selectionCount" class="scope"></span>
+    </div>
+    <div id="datasetTable" class="preview-wrap"></div>
+    <div class="actions">
+      <button id="previousDatasetPageBtn" class="secondary" type="button">Previous</button>
+      <span id="datasetPageMeta" class="scope"></span>
+      <button id="nextDatasetPageBtn" class="secondary" type="button">Next</button>
+    </div>
+  </section>
 
   <section class="panel">
     <h2>Mapping profile</h2>
@@ -92,6 +130,7 @@
     <div class="actions">
       <button id="addParameterBtn" class="secondary" type="button">Add Parameter Mapping</button>
       <button id="addCustomBtn" class="secondary" type="button">Add Custom Target</button>
+      <button id="applySuggestedProfileBtn" class="secondary" type="button">Apply Suggested Template</button>
       <button id="previewBtn" type="button">Preview Mapping</button>
       <button id="buildPlanBtn" type="button">Build Import Plan</button>
       <button id="saveProfileBtn" type="button">Save Profile</button>
@@ -106,13 +145,37 @@
   </section>
 
   <section class="panel">
-    <h2>Read-only import plan</h2>
+    <h2>Import plan and part creation</h2>
     <p id="planMeta" class="hint">Build a plan to validate every mapped row and compare part numbers against existing InvenTree parts and supplier parts. This does not modify inventory.</p>
     <div id="planSummary" class="actions"></div>
     <div class="actions">
       <button id="createCategoriesBtn" type="button" disabled>Create Missing Categories</button>
+      <button id="createPartsBtn" type="button" disabled>Create New Parts</button>
+      <label>Matching parts
+        <select id="existingPartMode">
+          <option value="update" selected>Update (preserve blanks and primary image)</option>
+          <option value="overwrite">Overwrite mapped fields and primary image</option>
+        </select>
+      </label>
+      <button id="importDetailsBtn" type="button" disabled>Import Notes, Parameters &amp; Images</button>
+      <button id="importProcurementBtn" type="button" disabled>Import Supplier &amp; Manufacturer Records</button>
     </div>
     <div id="categoryCreationResult" class="status" role="status" aria-live="polite"></div>
+    <div id="partCreationResult" class="status" role="status" aria-live="polite"></div>
+    <div id="detailImportResult" class="status" role="status" aria-live="polite"></div>
+    <div id="procurementImportResult" class="status" role="status" aria-live="polite"></div>
+    <div class="actions">
+      <label><input id="enableStockImport" type="checkbox" /> Enable physical stock creation</label>
+      <button id="createStockBtn" class="danger" type="button" disabled>Create Stock Items</button>
+    </div>
+    <p class="hint">Stock is a separate, opt-in stage. Each selected capture row can create stock only once.</p>
+    <div id="stockImportResult" class="status" role="status" aria-live="polite"></div>
+    <div class="actions">
+      <button id="prefetchImagesBtn" type="button" disabled>Validate &amp; Prefetch Images</button>
+      <button id="retryFailedImagesBtn" class="secondary" type="button" disabled>Retry Failed Images</button>
+      <button id="excludeFailedImagesBtn" class="danger" type="button" disabled>Exclude Failed &amp; Proceed</button>
+    </div>
+    <div id="imagePrefetchResult" class="status" role="status" aria-live="polite"></div>
     <div id="planTable" class="preview-wrap"></div>
   </section>
 
@@ -173,23 +236,342 @@
       const source = body.dataset.source;
       const captureProfile = body.dataset.captureProfile;
       const pageType = body.dataset.pageType;
+      const rowCount = Number(body.dataset.rowCount || 0);
+      let currentCapturePinned = body.dataset.pinned === "true";
       const fields = JSON.parse(document.getElementById("source-fields-data").textContent);
       const samples = JSON.parse(document.getElementById("source-samples-data").textContent);
       const csrfToken = document.querySelector("[name=csrfmiddlewaretoken]")?.value || "";
       const basePath = "/plugin/multi-site-importer/";
       const standardTargets = [
-        ["part_number", "Part Number"], ["name", "Name"], ["description", "Description"],
-        ["category", "Category"], ["subcategory", "Subcategory"], ["variant", "Variant"],
-        ["quantity", "Quantity"], ["notes", "Notes"], ["image_url", "Primary Image URL"]
+        ["part.ipn", "Part · IPN"], ["part.name", "Part · Name"],
+        ["part.description", "Part · Description"], ["part.category", "Part · Category"],
+        ["part.subcategory", "Part · Subcategory"], ["part.notes", "Part · Notes"],
+        ["part.image_url", "Part · Primary Image URL"], ["part.image_urls", "Part · Image Gallery"],
+        ["supplier.company", "Supplier · Company"], ["supplier.sku", "Supplier · SKU"],
+        ["supplier.description", "Supplier · Description"], ["supplier.link", "Supplier · Product URL"],
+        ["supplier.packaging", "Supplier · Packaging"], ["supplier.pack_quantity", "Supplier · Pack Quantity"],
+        ["supplier.notes", "Supplier · Notes"], ["supplier.active", "Supplier · Active"],
+        ["supplier.primary", "Supplier · Primary"],
+        ["supplier.price", "Supplier · Unit Price"], ["supplier.price_quantity", "Supplier · Price-Break Quantity"],
+        ["supplier.price_currency", "Supplier · Price Currency"],
+        ["manufacturer.company", "Manufacturer · Company"], ["manufacturer.mpn", "Manufacturer · MPN"],
+        ["manufacturer.description", "Manufacturer · Description"], ["manufacturer.link", "Manufacturer · Product URL"],
+        ["stock.quantity", "Stock · Quantity"], ["stock.location", "Stock · Location"],
+        ["stock.batch", "Stock · Batch"], ["stock.serial", "Stock · Serial"],
+        ["stock.status", "Stock · Status Code"], ["stock.packaging", "Stock · Packaging"],
+        ["stock.purchase_price", "Stock · Unit Purchase Price"], ["stock.price_currency", "Stock · Price Currency"],
+        ["stock.link", "Stock · Source URL"], ["stock.notes", "Stock · Notes"]
       ];
+      const legacyTargets = {
+        part_number:"part.ipn", IPN:"part.ipn", name:"part.name",
+        description:"part.description", category:"part.category",
+        subcategory:"part.subcategory", notes:"part.notes",
+        image_url:"part.image_url", image_urls:"part.image_urls"
+      };
+      const suggestedProfileTemplates = {
+        "mcmaster-carr|single-item|product-detail": {
+          "part.ipn": {source_field:"McMasterPartNumber", regex:""},
+          "part.name": {source_field:"ProductDetailPageTitle", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "part.category": {source_field:"ProductDetailBreadcrumbs", regex:"^([^>]+)"},
+          "part.subcategory": {source_field:"ProductDetailBreadcrumbs", regex:"^[^>]+ > (.+)$"},
+          "part.notes": {source_field:"ProductDetailNotes", regex:""},
+          "part.image_url": {source_field:"Image URL", regex:""},
+          "part.image_urls": {source_field:"Image URLs", regex:""},
+          "supplier.company": {template:"McMaster-Carr", regex:""},
+          "supplier.sku": {source_field:"McMasterPartNumber", regex:""},
+          "supplier.description": {source_field:"ProductDetailPageTitle", regex:""},
+          "supplier.link": {source_field:"ProductURL", regex:""},
+          "manufacturer.company": {template:"McMaster-Carr", regex:""},
+          "manufacturer.mpn": {source_field:"McMasterPartNumber", regex:""},
+          "parameter.Thread Size": {source_field:"ProductDetailThreadSize", regex:""},
+          "parameter.Length": {source_field:"ProductDetailLength", regex:""},
+          "parameter.Material": {source_field:"Spec_Material", regex:""},
+          "parameter.Canonical Type": {source_field:"ProductDetailPageTitle", regex:""},
+          "parameter.Canonical Size": {source_field:"ProductDetailVariant", regex:""},
+          "parameter.Canonical Material": {source_field:"Spec_Material", regex:""},
+          "parameter.Canonical Fingerprint": {template:"{ProductDetailPageTitle}|{ProductDetailVariant}|{Spec_Material}", regex:""}
+        },
+        "mcmaster-carr|list-details|category-table": {
+          "part.ipn": {source_field:"McMasterPartNumber", regex:""},
+          "part.name": {source_field:"Product", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "part.category": {source_field:"ProductListBreadcrumbs", regex:"^([^>]+)"},
+          "part.subcategory": {source_field:"ProductListBreadcrumbs", regex:"^[^>]+ > (.+)$"},
+          "part.image_url": {source_field:"Image URL", regex:""},
+          "part.image_urls": {source_field:"Image URLs", regex:""},
+          "supplier.company": {template:"McMaster-Carr", regex:""},
+          "supplier.sku": {source_field:"McMasterPartNumber", regex:""},
+          "supplier.description": {source_field:"Product", regex:""},
+          "supplier.link": {source_field:"ProductURL", regex:""},
+          "manufacturer.company": {template:"McMaster-Carr", regex:""},
+          "manufacturer.mpn": {source_field:"McMasterPartNumber", regex:""},
+          "parameter.Thread Size": {source_field:"Thread", regex:""},
+          "parameter.Length": {source_field:"Length", regex:""},
+          "parameter.Material": {source_field:"Material", regex:""},
+          "parameter.Canonical Type": {source_field:"Product", regex:""},
+          "parameter.Canonical Size": {template:"{Thread} x {Length}", regex:""},
+          "parameter.Canonical Material": {source_field:"Material", regex:""},
+          "parameter.Canonical Fingerprint": {template:"{Product}|{Thread} x {Length}|{Material}", regex:""}
+        },
+        "boltdepot|single-item|product-detail": {
+          "part.ipn": {source_field:"BoltDepotPartNumber", regex:""},
+          "part.name": {source_field:"ProductDetailPageTitle", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "part.category": {source_field:"ProductDetailBreadcrumbs", regex:"^([^>]+)"},
+          "part.subcategory": {source_field:"ProductDetailBreadcrumbs", regex:"^[^>]+ > (.+)$"},
+          "part.notes": {source_field:"ProductDetailSpecs", regex:""},
+          "part.image_url": {source_field:"RowImageURL", regex:""},
+          "supplier.company": {template:"Bolt Depot", regex:""},
+          "supplier.sku": {source_field:"BoltDepotPartNumber", regex:""},
+          "supplier.description": {source_field:"ProductDetailPageTitle", regex:""},
+          "supplier.link": {source_field:"ProductURL", regex:""},
+          "parameter.Canonical Type": {source_field:"ProductDetailPageTitle", regex:""},
+          "parameter.Canonical Size": {template:"{Spec_Thread_Size} x {Spec_Length}", regex:""},
+          "parameter.Canonical Material": {source_field:"Spec_Material", regex:""},
+          "parameter.Canonical Fingerprint": {template:"{ProductDetailPageTitle}|{Spec_Thread_Size} x {Spec_Length}|{Spec_Material}", regex:""}
+        },
+        "boltdepot|list-details|catalog-table": {
+          "part.ipn": {source_field:"BoltDepotPartNumber", regex:""},
+          "part.name": {source_field:"Product", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "part.category": {source_field:"ProductListBreadcrumbs", regex:"^([^>]+)"},
+          "part.subcategory": {source_field:"ProductListBreadcrumbs", regex:"^[^>]+ > (.+)$"},
+          "part.image_url": {source_field:"RowImageURL", regex:""},
+          "supplier.company": {template:"Bolt Depot", regex:""},
+          "supplier.sku": {source_field:"BoltDepotPartNumber", regex:""},
+          "supplier.description": {source_field:"Product", regex:""},
+          "supplier.link": {source_field:"ProductURL", regex:""},
+          "parameter.Canonical Type": {source_field:"Product", regex:""},
+          "parameter.Canonical Size": {template:"{Thread} x {Length}", regex:""},
+          "parameter.Canonical Material": {source_field:"Material", regex:""},
+          "parameter.Canonical Fingerprint": {template:"{Product}|{Thread} x {Length}|{Material}", regex:""}
+        },
+        "boltdepot|list-details|order-details": {
+          "part.ipn": {source_field:"BoltDepotPartNumber", regex:""},
+          "part.name": {source_field:"Product", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "supplier.company": {template:"Bolt Depot", regex:""},
+          "supplier.sku": {source_field:"BoltDepotPartNumber", regex:""},
+          "supplier.description": {source_field:"Description", regex:""},
+          "supplier.link": {source_field:"ProductURL", regex:""},
+          "stock.quantity": {source_field:"Quantity", regex:""},
+          "stock.link": {source_field:"SourcePageURL", regex:""},
+          "parameter.Canonical Type": {source_field:"Product", regex:""},
+          "parameter.Canonical Fingerprint": {template:"{Product}|{BoltDepotPartNumber}", regex:""}
+        },
+        "amazon|single-item|product-detail": {
+          "part.ipn": {source_field:"Manufacturer Part Number", regex:""},
+          "part.name": {source_field:"Product Name", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "part.category": {source_field:"Category", regex:"^([^>]+)"},
+          "part.subcategory": {source_field:"Category", regex:"^[^>]+ > (.+)$"},
+          "part.notes": {source_field:"About This Item", regex:""},
+          "part.image_url": {source_field:"Image URL", regex:""},
+          "part.image_urls": {source_field:"Image URLs", regex:""},
+          "supplier.company": {source_field:"Sold By", regex:""},
+          "supplier.sku": {source_field:"ASIN", regex:""},
+          "supplier.description": {source_field:"Product Name", regex:""},
+          "supplier.link": {source_field:"Product URL", regex:""},
+          "supplier.price": {source_field:"Price", regex:"([0-9]+(?:\\.[0-9]+)?)"},
+          "supplier.price_currency": {source_field:"Price Currency", regex:""},
+          "manufacturer.company": {source_field:"Manufacturer", regex:""},
+          "manufacturer.mpn": {source_field:"Manufacturer Part Number", regex:""},
+          "parameter.Brand": {source_field:"Brand", regex:""},
+          "parameter.Model Number": {source_field:"Model Number", regex:""},
+          "parameter.Canonical Type": {source_field:"Product Name", regex:""},
+          "parameter.Canonical Size": {source_field:"Selected Variations", regex:""},
+          "parameter.Canonical Material": {source_field:"Material", regex:""},
+          "parameter.Canonical Fingerprint": {template:"{Product Name}|{Selected Variations}|{Brand}|{Manufacturer Part Number}", regex:""}
+        },
+        "amazon|list-details|order-items": {
+          "part.ipn": {source_field:"Manufacturer Part Number", regex:""},
+          "part.name": {source_field:"Product Name", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "part.category": {source_field:"Category", regex:"^([^>]+)"},
+          "part.subcategory": {source_field:"Category", regex:"^[^>]+ > (.+)$"},
+          "part.image_url": {source_field:"Image URL", regex:""},
+          "supplier.company": {source_field:"Sold By", regex:""},
+          "supplier.sku": {source_field:"ASIN", regex:""},
+          "supplier.description": {source_field:"Product Name", regex:""},
+          "supplier.link": {source_field:"Product URL", regex:""},
+          "parameter.Canonical Type": {source_field:"Product Name", regex:""},
+          "parameter.Canonical Size": {source_field:"Selected Variations", regex:""},
+          "parameter.Canonical Fingerprint": {template:"{Product Name}|{Selected Variations}|{Brand}|{ASIN}", regex:""}
+        },
+        "fastenal|single-item|product-detail": {
+          "part.ipn": {source_field:"FastenalPartNumber", regex:""},
+          "part.name": {source_field:"ProductDetailPageTitle", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "part.category": {source_field:"ProductDetailBreadcrumbs", regex:"^([^>]+)"},
+          "part.subcategory": {source_field:"ProductDetailBreadcrumbs", regex:"^[^>]+ > (.+)$"},
+          "part.notes": {source_field:"ProductDetailSpecs", regex:""},
+          "part.image_url": {source_field:"Image URL", regex:""},
+          "part.image_urls": {source_field:"Image URLs", regex:""},
+          "supplier.company": {template:"Fastenal", regex:""},
+          "supplier.sku": {source_field:"FastenalPartNumber", regex:""},
+          "supplier.description": {source_field:"ProductDetailPageTitle", regex:""},
+          "supplier.link": {source_field:"ProductURL", regex:""},
+          "manufacturer.company": {template:"Fastenal", regex:""},
+          "manufacturer.mpn": {source_field:"FastenalPartNumber", regex:""},
+          "parameter.Thread Size": {source_field:"Spec_Thread_Size", regex:""},
+          "parameter.Length": {source_field:"Spec_Length", regex:""},
+          "parameter.Material": {source_field:"Spec_Material", regex:""},
+          "parameter.Canonical Type": {source_field:"ProductDetailPageTitle", regex:""},
+          "parameter.Canonical Size": {template:"{Spec_Thread_Size} x {Spec_Length}", regex:""},
+          "parameter.Canonical Material": {source_field:"Spec_Material", regex:""},
+          "parameter.Canonical Fingerprint": {template:"{ProductDetailPageTitle}|{Spec_Thread_Size} x {Spec_Length}|{Spec_Material}", regex:""}
+        },
+        "fastenal|list-details|catalog-list": {
+          "part.ipn": {source_field:"FastenalPartNumber", regex:""},
+          "part.name": {source_field:"Product", regex:""},
+          "part.description": {source_field:"Description", regex:""},
+          "part.category": {source_field:"ProductListBreadcrumbs", regex:"^([^>]+)"},
+          "part.subcategory": {source_field:"ProductListBreadcrumbs", regex:"^[^>]+ > (.+)$"},
+          "part.image_url": {source_field:"RowImageURL", regex:""},
+          "supplier.company": {template:"Fastenal", regex:""},
+          "supplier.sku": {source_field:"FastenalPartNumber", regex:""},
+          "supplier.description": {source_field:"Product", regex:""},
+          "supplier.link": {source_field:"ProductURL", regex:""},
+          "manufacturer.company": {template:"Fastenal", regex:""},
+          "manufacturer.mpn": {source_field:"FastenalPartNumber", regex:""},
+          "parameter.Canonical Type": {source_field:"Product", regex:""},
+          "parameter.Canonical Fingerprint": {template:"{Product}|{FastenalPartNumber}", regex:""}
+        }
+      };
+
+      function normalizeTemplateScopeValue(value) {
+        return String(value || "").trim().toLowerCase();
+      }
+
+      function suggestedTemplateRules() {
+        const src = normalizeTemplateScopeValue(source);
+        const profile = normalizeTemplateScopeValue(captureProfile);
+        const page = normalizeTemplateScopeValue(pageType);
+        const exact = `${src}|${profile}|${page}`;
+        if (suggestedProfileTemplates[exact]) return suggestedProfileTemplates[exact];
+        const profileWildcard = `${src}|${profile}|*`;
+        if (suggestedProfileTemplates[profileWildcard]) return suggestedProfileTemplates[profileWildcard];
+        const pageWildcard = `${src}|*|${page}`;
+        if (suggestedProfileTemplates[pageWildcard]) return suggestedProfileTemplates[pageWildcard];
+        const sourceWildcard = `${src}|*|*`;
+        return suggestedProfileTemplates[sourceWildcard] || null;
+      }
       let selectedProfileId = null;
       let profiles = [];
       let lastPlan = null;
+      let lastPrefetchFailures = [];
+      let datasetOffset = 0;
+      const datasetPageSize = 100;
+      let visibleDatasetIndices = [];
+      const selectedRowIndices = new Set(Array.from({length:rowCount}, (_value, index) => index));
+      const selectedCleanupCaptureIds = new Set();
 
       const $ = (id) => document.getElementById(id);
       const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
         "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
       }[char]));
+
+      function formatBytes(value) {
+        let bytes = Number(value || 0);
+        const units = ["B", "KB", "MB", "GB"];
+        let unit = 0;
+        while (bytes >= 1024 && unit < units.length - 1) { bytes /= 1024; unit += 1; }
+        return `${bytes.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+      }
+
+      function cleanupSelectionChanged() {
+        for (const id of ["clearSelectedPrefetchBtn", "deleteSelectedCapturesBtn"]) {
+          if ($(id)) $(id).disabled = !selectedCleanupCaptureIds.size;
+        }
+      }
+
+      async function loadCleanupCatalog() {
+        if (!$("cleanupTable")) return;
+        const result = await api("captures/cleanup/");
+        const captures = result.captures || [];
+        selectedCleanupCaptureIds.clear();
+        cleanupSelectionChanged();
+        $("cleanupTable").innerHTML = captures.length ? `<table><thead><tr>
+          <th>Select</th><th>Capture</th><th>Source</th><th>Created</th><th>Rows</th><th>Prefetch cache</th><th>Page</th>
+        </tr></thead><tbody>${captures.map((item) => `<tr>
+          <td><input class="cleanup-select" type="checkbox" data-id="${item.pk}" /></td>
+          <td>#${item.pk}</td><td>${escapeHtml(item.source)}</td>
+          <td>${escapeHtml(new Date(item.created_at).toLocaleString())}</td>
+          <td>${item.row_count}</td><td>${item.prefetch_count} files · ${formatBytes(item.prefetch_bytes)}</td>
+          <td><a href="${escapeHtml(item.page_url)}" target="_blank" rel="noreferrer">${escapeHtml(item.page_title || item.page_url)}</a></td>
+        </tr>`).join("")}</tbody></table>` : "<p>No captures are currently eligible for cleanup.</p>";
+        for (const checkbox of document.querySelectorAll(".cleanup-select")) {
+          checkbox.addEventListener("change", () => {
+            const id = Number(checkbox.dataset.id);
+            if (checkbox.checked) selectedCleanupCaptureIds.add(id);
+            else selectedCleanupCaptureIds.delete(id);
+            cleanupSelectionChanged();
+          });
+        }
+      }
+
+      async function runManualCleanup(action) {
+        const ids = Array.from(selectedCleanupCaptureIds);
+        if (!ids.length) throw new Error("Select at least one eligible capture.");
+        const label = action === "delete_captures"
+          ? "permanently delete the selected raw captures and cached prefetch files"
+          : "delete cached prefetch files for the selected captures";
+        if (!confirm(`Really ${label}? Imported inventory records and Part attachments are not affected.`)) return;
+        const result = await api("captures/cleanup/", {
+          method:"POST", body:JSON.stringify({capture_ids:ids, action, confirm:true})
+        });
+        $("cleanupResult").className = "status visible ok";
+        $("cleanupResult").textContent = `${result.capture_count} captures and ${result.prefetch_count} cached files removed (${formatBytes(result.prefetch_bytes)}).` +
+          (result.rejected_capture_ids.length ? ` Protected or ineligible captures skipped: ${result.rejected_capture_ids.join(", ")}.` : "");
+        await loadCleanupCatalog();
+      }
+
+      function selectedRowsPayload() {
+        return Array.from(selectedRowIndices).sort((left, right) => left - right);
+      }
+
+      function selectionChanged() {
+        lastPlan = null;
+        lastPrefetchFailures = [];
+        $("createCategoriesBtn").disabled = true;
+        $("createPartsBtn").disabled = true;
+        $("importDetailsBtn").disabled = true;
+        $("importProcurementBtn").disabled = true;
+        $("createStockBtn").disabled = true;
+        $("prefetchImagesBtn").disabled = true;
+        $("retryFailedImagesBtn").disabled = true;
+        $("excludeFailedImagesBtn").disabled = true;
+        $("selectionCount").textContent = `${selectedRowIndices.size} of ${rowCount} selected`;
+        $("planMeta").textContent = "Dataset selection changed. Build a new plan before creating inventory.";
+      }
+
+      async function loadDatasetPage(offset=datasetOffset) {
+        datasetOffset = Math.max(0, Math.min(offset, Math.max(0, rowCount - 1)));
+        const result = await api(`captures/${captureId}/rows/?offset=${datasetOffset}&limit=${datasetPageSize}`);
+        const rows = result.rows || [];
+        visibleDatasetIndices = rows.map((item) => item.row_index);
+        const keys = Array.from(new Set(rows.flatMap((item) => Object.keys(item.values || {})))).slice(0, 8);
+        $("datasetTable").innerHTML = rows.length ? `<table><thead><tr><th>Import</th><th>Row</th>${
+          keys.map((key) => `<th>${escapeHtml(key)}</th>`).join("")
+        }</tr></thead><tbody>${rows.map((item) => `<tr>
+          <td><input class="dataset-row-checkbox" type="checkbox" data-row-index="${item.row_index}" ${selectedRowIndices.has(item.row_index) ? "checked" : ""} /></td>
+          <td>#${item.row_index + 1}</td>${keys.map((key) =>
+            `<td><code>${escapeHtml(typeof item.values?.[key] === "object" ? JSON.stringify(item.values[key]) : item.values?.[key] ?? "")}</code></td>`
+          ).join("")}</tr>`).join("")}</tbody></table>` : "<p>No dataset rows.</p>";
+        document.querySelectorAll(".dataset-row-checkbox").forEach((checkbox) => {
+          checkbox.addEventListener("change", () => {
+            const index = Number(checkbox.dataset.rowIndex);
+            if (checkbox.checked) selectedRowIndices.add(index); else selectedRowIndices.delete(index);
+            selectionChanged();
+          });
+        });
+        const pageEnd = Math.min(rowCount, datasetOffset + rows.length);
+        $("datasetPageMeta").textContent = rowCount ? `Rows ${datasetOffset + 1}–${pageEnd} of ${rowCount}` : "No rows";
+        $("previousDatasetPageBtn").disabled = datasetOffset === 0;
+        $("nextDatasetPageBtn").disabled = datasetOffset + datasetPageSize >= rowCount;
+        $("selectionCount").textContent = `${selectedRowIndices.size} of ${rowCount} selected`;
+      }
 
       function imagePreview(value) {
         const raw = String(value ?? "").trim();
@@ -209,6 +591,25 @@
         } catch {
           return `<code>${escapeHtml(raw)}</code>`;
         }
+      }
+
+      function imageGalleryPreview(value) {
+        let urls = Array.isArray(value) ? value : [];
+        if (!urls.length) {
+          const raw = String(value ?? "").trim();
+          if (raw.startsWith("[")) {
+            try {
+              const parsed = JSON.parse(raw);
+              if (Array.isArray(parsed)) urls = parsed;
+            } catch {}
+          }
+          if (!urls.length && raw) urls = raw.split(/\r?\n/);
+        }
+        urls = [...new Set(urls.map((url) => String(url ?? "").trim()).filter(Boolean))];
+        if (!urls.length) return "—";
+        const visible = urls.slice(0, 8).map((url) => imagePreview(url)).join("");
+        const remainder = urls.length > 8 ? `<span>+${urls.length - 8} more</span>` : "";
+        return `<div class="image-gallery-preview">${visible}${remainder}<strong>${urls.length} image${urls.length === 1 ? "" : "s"}</strong></div>`;
       }
 
       function setStatus(message, kind="") {
@@ -338,7 +739,8 @@
 
       function applyRules(rules={}) {
         resetRules();
-        for (const [target, rule] of Object.entries(rules || {})) {
+        for (const [rawTarget, rule] of Object.entries(rules || {})) {
+          const target = legacyTargets[rawTarget] || rawTarget;
           const standard = Array.from($("standardRules").children).find((row) => row.querySelector(".rule-target").value === target);
           if (standard) {
             standard.querySelector(".rule-mode").value = rule.template ? "template" : "single";
@@ -356,6 +758,25 @@
             template:rule.template || "", regex:rule.regex || "", removable:true, parameter
           }));
         }
+      }
+
+      function applySuggestedTemplate() {
+        const rules = suggestedTemplateRules();
+        if (!rules) {
+          throw new Error(
+            `No suggested template is available for ${source} / ${captureProfile} / ${pageType}.`
+          );
+        }
+        const hasExistingRules = Object.keys(collectRules()).length > 0;
+        if (hasExistingRules && !confirm("Replace current mapping rules with the suggested template for this capture scope?")) {
+          return;
+        }
+        applyRules(rules);
+        setStatus(
+          `Applied suggested template for ${source} / ${captureProfile} / ${pageType}. ` +
+          "Review canonical fingerprint fields before saving.",
+          "ok"
+        );
       }
 
       function profilePayload() {
@@ -404,7 +825,7 @@
         const keys = Array.from(new Set(items.flatMap((item) => Object.keys(item))));
         container.innerHTML = `<table><thead><tr><th>Row</th>${keys.map((key) => `<th>${escapeHtml(key)}</th>`).join("")}</tr></thead>
           <tbody>${items.map((item,index) => `<tr><td>${index + 1}</td>${keys.map((key) =>
-            `<td>${key === "image_url" ? imagePreview(item[key]) : `<code>${escapeHtml(item[key] ?? "")}</code>`}</td>`
+            `<td>${key === "image_url" ? imagePreview(item[key]) : key === "image_urls" ? imageGalleryPreview(item[key]) : `<code>${escapeHtml(item[key] ?? "")}</code>`}</td>`
           ).join("")}</tr>`).join("")}</tbody></table>`;
       }
 
@@ -424,6 +845,31 @@
         $("createCategoriesBtn").title = missingPaths.length
           ? missingPaths.map((item) => item.path).join("\n")
           : "No mapped category paths are missing.";
+        $("createPartsBtn").disabled = !plan.ready || !(summary.create || summary.update);
+        $("createPartsBtn").title = plan.ready
+          ? `${summary.create || 0} new part(s) will be created; ${summary.update || 0} existing match(es) will be skipped.`
+          : "Resolve every plan conflict and error before creating parts.";
+        $("importDetailsBtn").disabled = !plan.ready || !!summary.create || !summary.update;
+        $("importDetailsBtn").title = summary.create
+          ? "Create the selected new parts first."
+          : "Write mapped notes and parameters, then download primary and gallery images.";
+        const procurementRows = (plan.rows || []).filter(
+          (row) => row.supplier_action !== "none" || row.manufacturer_action !== "none"
+        );
+        $("importProcurementBtn").disabled = !plan.ready || !!summary.create || !procurementRows.length;
+        const stockRows = (plan.rows || []).filter((row) => row.stock_action !== "none");
+        $("createStockBtn").disabled = (
+          !plan.ready || !!summary.create || !stockRows.length || !$("enableStockImport").checked
+        );
+        const plannedImageCount = (plan.rows || []).reduce(
+          (total, row) => total + Number(row.image_count || 0), 0
+        );
+        $("prefetchImagesBtn").disabled = !plan.ready || !plannedImageCount;
+        $("prefetchImagesBtn").title = `${plannedImageCount} mapped image URL${plannedImageCount === 1 ? "" : "s"} will be validated and cached.`;
+        $("retryFailedImagesBtn").disabled = !lastPrefetchFailures.length;
+        $("excludeFailedImagesBtn").disabled = (
+          !lastPrefetchFailures.length || !plan.ready || !!summary.create
+        );
         const rows = plan.rows || [];
         $("planTable").innerHTML = `<table><thead><tr>
           <th>Row</th><th>Action</th><th>Part Number</th><th>Name</th><th>Category</th>
@@ -439,7 +885,7 @@
           const category = [row.category, row.subcategory].filter(Boolean).join(" > ");
           return `<tr><td>${row.row_index + 1}</td><td><strong>${escapeHtml(row.action)}</strong></td>
             <td><code>${escapeHtml(row.part_number)}</code></td><td>${escapeHtml(row.name)}</td>
-            <td>${escapeHtml(category)}</td><td>${imagePreview(row.mapped?.image_url)}</td><td>${row.parameter_count || 0}</td>
+            <td>${escapeHtml(category)}</td><td>${imageGalleryPreview(row.image_urls || row.mapped?.image_urls || row.mapped?.image_url)}</td><td>${row.parameter_count || 0}</td>
             <td><code>${escapeHtml([...partMatches,...supplierMatches,...categoryMatches].join("\n") || "—")}</code></td>
             <td><code>${escapeHtml(messages.join("\n") || "—")}</code></td></tr>`;
         }).join("")}</tbody></table>`;
@@ -448,7 +894,9 @@
       async function preview() {
         const rules = collectRules();
         if (!Object.keys(rules).length) throw new Error("Map at least one source field before previewing.");
-        const result = await api(`captures/${captureId}/preview/`, {method:"POST", body:JSON.stringify({rules})});
+        const result = await api(`captures/${captureId}/preview/`, {
+          method:"POST", body:JSON.stringify({rules, selected_row_indices:selectedRowsPayload()})
+        });
         renderPreview(result.items);
         $("previewMeta").textContent = `Showing ${result.preview_count} of ${result.row_count} captured rows. Preview only; inventory was not modified.`;
         setStatus("Mapping preview updated.", "ok");
@@ -458,7 +906,9 @@
         const rules = collectRules();
         if (!Object.keys(rules).length) throw new Error("Map at least one source field before building a plan.");
         if (announce) setStatus("Building read-only import plan…");
-        const result = await api(`captures/${captureId}/plan/`, {method:"POST", body:JSON.stringify({rules})});
+        const result = await api(`captures/${captureId}/plan/`, {
+          method:"POST", body:JSON.stringify({rules, selected_row_indices:selectedRowsPayload()})
+        });
         renderPlan(result);
         if (announce) {
           setStatus(result.ready ? "Import plan is ready." : "Import plan contains issues to resolve.", result.ready ? "ok" : "error");
@@ -481,7 +931,7 @@
         try {
           const result = await api(`captures/${captureId}/categories/`, {
             method:"POST",
-            body:JSON.stringify({rules, confirm:true})
+            body:JSON.stringify({rules, selected_row_indices:selectedRowsPayload(), confirm:true})
           });
           const createdPaths = (result.created || []).map((item) => `Created: ${item.path} (#${item.pk})`);
           const reusedPaths = (result.existing || []).map((item) => `Reused: ${item.path} (#${item.pk})`);
@@ -510,6 +960,257 @@
         }
       }
 
+      async function createParts() {
+        if (!lastPlan?.ready) throw new Error("Build a ready import plan first.");
+        const createCount = lastPlan.summary?.create || 0;
+        const skipCount = lastPlan.summary?.update || 0;
+        if (!confirm(
+          `Create ${createCount} new InvenTree part${createCount === 1 ? "" : "s"}?\n\n` +
+          `${skipCount} existing match${skipCount === 1 ? "" : "es"} will be skipped. ` +
+          "The server will rebuild the live plan before writing. Images, parameters, supplier parts, and stock will not be created in this step."
+        )) return;
+        const button = $("createPartsBtn");
+        const resultNode = $("partCreationResult");
+        button.disabled = true;
+        button.textContent = "Creating Parts…";
+        resultNode.className = "status visible";
+        resultNode.textContent = "Revalidating the plan and creating new parts…";
+        try {
+          const result = await api(`captures/${captureId}/parts/`, {
+            method:"POST",
+            body:JSON.stringify({
+              rules:collectRules(), selected_row_indices:selectedRowsPayload(), confirm:true
+            })
+          });
+          const created = (result.created || []).map((item) =>
+            `Created Part #${item.pk}: ${item.part_number} — ${item.name}`
+          );
+          resultNode.className = "status visible ok";
+          resultNode.textContent = [
+            `Part creation finished: ${result.created_count} created, ${result.skipped_existing_count} existing skipped.`,
+            ...created,
+            "Images, parameters, supplier parts, and stock were not modified."
+          ].join("\n");
+          await buildPlan({announce:false});
+          setStatus("New parts created and the import plan was refreshed.", "ok");
+        } catch (error) {
+          resultNode.className = "status visible error";
+          resultNode.textContent = `Part creation failed: ${error.message}`;
+          throw error;
+        } finally {
+          button.textContent = "Create New Parts";
+          button.disabled = !lastPlan?.ready || !(
+            (lastPlan?.summary?.create || 0) + (lastPlan?.summary?.update || 0)
+          );
+        }
+      }
+
+      function selectedPlanImageUrls() {
+        return Array.from(new Set(
+          (lastPlan?.rows || []).flatMap((row) => row.image_urls || [])
+        ));
+      }
+
+      async function prefetchImages(urls=selectedPlanImageUrls()) {
+        if (!lastPlan?.ready) throw new Error("Build a ready plan before prefetching images.");
+        if (!urls.length) throw new Error("The selected plan contains no image URLs.");
+        const rules = collectRules();
+        const selectedIndices = (lastPlan.rows || []).map((row) => row.row_index);
+        const batches = [];
+        for (let index = 0; index < urls.length; index += 25) {
+          batches.push(urls.slice(index, index + 25));
+        }
+        const button = $("prefetchImagesBtn");
+        const resultNode = $("imagePrefetchResult");
+        button.disabled = true;
+        lastPrefetchFailures = [];
+        resultNode.className = "status visible";
+        let readyCount = 0;
+        try {
+          for (let index = 0; index < batches.length; index += 1) {
+            button.textContent = `Prefetching ${index + 1}/${batches.length}…`;
+            resultNode.textContent = `Validating and caching image batch ${index + 1} of ${batches.length}…`;
+            const result = await api(`captures/${captureId}/images/prefetch/`, {
+              method:"POST",
+              body:JSON.stringify({
+                rules,
+                selected_row_indices:selectedIndices,
+                image_urls:batches[index],
+                confirm:true
+              })
+            });
+            readyCount += Number(result.ready_count || 0);
+            lastPrefetchFailures.push(
+              ...(result.items || []).filter((item) => item.status === "failed")
+            );
+          }
+          resultNode.className = `status visible ${lastPrefetchFailures.length ? "error" : "ok"}`;
+          resultNode.textContent = [
+            `${readyCount} images are validated and cached; ${lastPrefetchFailures.length} failed.`,
+            ...lastPrefetchFailures.map((item) => `FAILED: ${item.error} (${item.url})`),
+            lastPrefetchFailures.length
+              ? "Retry the failures or explicitly exclude them to proceed."
+              : "All selected images are ready for import."
+          ].join("\n");
+          $("retryFailedImagesBtn").disabled = !lastPrefetchFailures.length;
+          $("excludeFailedImagesBtn").disabled = (
+            !lastPrefetchFailures.length || !!lastPlan?.summary?.create
+          );
+          setStatus(
+            lastPrefetchFailures.length ? "Image preflight found failures." : "Image preflight completed.",
+            lastPrefetchFailures.length ? "error" : "ok"
+          );
+        } finally {
+          button.textContent = "Validate & Prefetch Images";
+          button.disabled = !lastPlan?.ready || !selectedPlanImageUrls().length;
+        }
+      }
+
+      async function excludeFailedImagesAndProceed() {
+        if (!lastPrefetchFailures.length) throw new Error("There are no failed images to exclude.");
+        if (lastPlan?.summary?.create) throw new Error("Create the selected parts before proceeding.");
+        const failedUrls = lastPrefetchFailures.map((item) => item.url);
+        if (!confirm(
+          `Exclude ${failedUrls.length} failed image${failedUrls.length === 1 ? "" : "s"} and continue the detail import?\n\n` +
+          "The failed images will not be attached. Cached successful images will still be imported."
+        )) return;
+        await api(`captures/${captureId}/images/exclude-failures/`, {
+          method:"POST",
+          body:JSON.stringify({image_urls:failedUrls, confirm:true})
+        });
+        lastPrefetchFailures = [];
+        $("retryFailedImagesBtn").disabled = true;
+        $("excludeFailedImagesBtn").disabled = true;
+        $("imagePrefetchResult").className = "status visible ok";
+        $("imagePrefetchResult").textContent = `${failedUrls.length} failed images were explicitly excluded.`;
+        await importPartDetails();
+      }
+
+      async function importPartDetails() {
+        if (!lastPlan?.ready || lastPlan.summary?.create) {
+          throw new Error("Create all selected parts and build a ready plan first.");
+        }
+        const partCount = lastPlan.summary?.update || 0;
+        const existingPartMode = $("existingPartMode").value;
+        const importRules = collectRules();
+        const imageLimit = Math.max(1, Number(lastPlan.detail_import_image_limit || 100));
+        const rowLimit = Math.max(1, Number(lastPlan.detail_import_row_limit || 100));
+        const batches = [];
+        let batch = [];
+        let batchImages = 0;
+        for (const row of (lastPlan.rows || [])) {
+          const rowImages = Number(row.image_count || 0);
+          if (rowImages > imageLimit) {
+            throw new Error(
+              `Row ${row.row_index + 1} contains ${rowImages} images, exceeding the per-request limit of ${imageLimit}.`
+            );
+          }
+          if (batch.length && (batchImages + rowImages > imageLimit || batch.length >= rowLimit)) {
+            batches.push(batch);
+            batch = [];
+            batchImages = 0;
+          }
+          batch.push(row.row_index);
+          batchImages += rowImages;
+        }
+        if (batch.length) batches.push(batch);
+        const modeExplanation = existingPartMode === "overwrite"
+          ? "Mapped description and notes may be cleared, and a mapped primary image replaces the current primary image."
+          : "Blank mapped values and an existing primary image are preserved.";
+        if (!confirm(
+          `Import mapped fields, notes, parameters, and images for ${partCount} part${partCount === 1 ? "" : "s"} in ${batches.length} batch${batches.length === 1 ? "" : "es"} using ${existingPartMode} mode?\n\n` +
+          `${modeExplanation} Parameters with matching InvenTree templates are created or updated. ` +
+          "Unrelated parameters and user-created attachments are preserved."
+        )) return;
+        const button = $("importDetailsBtn");
+        const resultNode = $("detailImportResult");
+        button.disabled = true;
+        button.textContent = "Importing Details…";
+        resultNode.className = "status visible";
+        resultNode.textContent = `Starting ${batches.length} detail-import batch${batches.length === 1 ? "" : "es"}…`;
+        try {
+          const total = {
+            part_count:0, part_fields_updated:0, parameters_written:0,
+            primary_images_written:0, gallery_attachments_written:0,
+            cached_images_used:0, excluded_image_count:0,
+            image_error_count:0, image_errors:[]
+          };
+          for (let index = 0; index < batches.length; index += 1) {
+            button.textContent = `Importing Batch ${index + 1}/${batches.length}…`;
+            resultNode.textContent = `Processing batch ${index + 1} of ${batches.length}…`;
+            const result = await api(`captures/${captureId}/details/`, {
+              method:"POST",
+              body:JSON.stringify({
+                rules:importRules,
+                selected_row_indices:batches[index],
+                existing_part_mode:existingPartMode,
+                confirm:true
+              })
+            });
+            for (const key of [
+              "part_count", "part_fields_updated", "parameters_written",
+              "primary_images_written", "gallery_attachments_written",
+              "cached_images_used", "excluded_image_count", "image_error_count"
+            ]) total[key] += Number(result[key] || 0);
+            total.image_errors.push(...(result.image_errors || []));
+          }
+          resultNode.className = `status visible ${total.image_error_count ? "error" : "ok"}`;
+          resultNode.textContent = [
+            `Completed ${batches.length} batches covering ${total.part_count} parts.`,
+            `Mode: ${existingPartMode}. ${total.part_fields_updated} part fields updated; ${total.parameters_written} parameters written.`,
+            `${total.primary_images_written} primary images and ${total.gallery_attachments_written} gallery attachments written.`,
+            `${total.cached_images_used} cached images reused; ${total.excluded_image_count} explicitly excluded.`,
+            ...(total.image_errors || []).map((item) =>
+              `Row ${item.row_index + 1}: ${item.detail} (${item.url})`
+            )
+          ].join("\n");
+          setStatus(
+            total.image_error_count ? "Batched details imported with image download errors." : "Batched part details imported.",
+            total.image_error_count ? "error" : "ok"
+          );
+        } catch (error) {
+          resultNode.className = "status visible error";
+          resultNode.textContent = `Detail import failed: ${error.message}`;
+          throw error;
+        } finally {
+          button.textContent = "Import Notes, Parameters & Images";
+          button.disabled = !lastPlan?.ready || !!lastPlan?.summary?.create || !lastPlan?.summary?.update;
+        }
+      }
+
+      async function importProcurement() {
+        if (!lastPlan?.ready || lastPlan.summary?.create) throw new Error("Create all selected Parts first.");
+        if (!confirm("Create or update the mapped Supplier Parts and Manufacturer Parts? Companies must already exist in InvenTree.")) return;
+        const node = $("procurementImportResult");
+        node.className = "status visible";
+        node.textContent = "Importing procurement records…";
+        const result = await api(`captures/${captureId}/procurement/`, {
+          method:"POST", body:JSON.stringify({
+            rules:collectRules(), selected_row_indices:selectedRowsPayload(),
+            existing_part_mode:$("existingPartMode").value, confirm:true
+          })
+        });
+        node.className = "status visible ok";
+        node.textContent = `Supplier Parts: ${result.supplier_created} created, ${result.supplier_updated} updated. Manufacturer Parts: ${result.manufacturer_created} created, ${result.manufacturer_updated} updated.`;
+        await buildPlan({announce:false});
+      }
+
+      async function createStock() {
+        if (!$("enableStockImport").checked) throw new Error("Enable physical stock creation first.");
+        if (!confirm("Create physical Stock Items for mapped positive quantities? This is idempotent per capture row and does not update existing stock.")) return;
+        const node = $("stockImportResult");
+        node.className = "status visible";
+        node.textContent = "Creating stock items…";
+        const result = await api(`captures/${captureId}/stock/`, {
+          method:"POST", body:JSON.stringify({
+            rules:collectRules(), selected_row_indices:selectedRowsPayload(),
+            enable_stock:true, confirm:true
+          })
+        });
+        node.className = "status visible ok";
+        node.textContent = `${result.created_count} Stock Items created; ${result.skipped_count} previously imported rows skipped.`;
+      }
+
       async function saveProfile() {
         const payload = profilePayload();
         const path = selectedProfileId ? `mapping-profiles/${selectedProfileId}/` : "mapping-profiles/";
@@ -521,10 +1222,70 @@
       }
 
       $("addParameterBtn").addEventListener("click", () => $("parameterRules").append(createRuleRow({removable:true,parameter:true})));
+      $("selectAllRowsBtn").addEventListener("click", async () => {
+        for (let index = 0; index < rowCount; index += 1) selectedRowIndices.add(index);
+        selectionChanged();
+        await loadDatasetPage();
+      });
+      $("deselectAllRowsBtn").addEventListener("click", async () => {
+        selectedRowIndices.clear();
+        selectionChanged();
+        await loadDatasetPage();
+      });
+      $("selectPageRowsBtn").addEventListener("click", async () => {
+        visibleDatasetIndices.forEach((index) => selectedRowIndices.add(index));
+        selectionChanged();
+        await loadDatasetPage();
+      });
+      $("deselectPageRowsBtn").addEventListener("click", async () => {
+        visibleDatasetIndices.forEach((index) => selectedRowIndices.delete(index));
+        selectionChanged();
+        await loadDatasetPage();
+      });
+      $("previousDatasetPageBtn").addEventListener("click", () => loadDatasetPage(datasetOffset - datasetPageSize));
+      $("nextDatasetPageBtn").addEventListener("click", () => loadDatasetPage(datasetOffset + datasetPageSize));
       $("addCustomBtn").addEventListener("click", () => $("parameterRules").append(createRuleRow({removable:true})));
+      $("applySuggestedProfileBtn").addEventListener("click", () => {
+        try {
+          applySuggestedTemplate();
+        } catch (error) {
+          setStatus(error.message, "error");
+        }
+      });
       $("previewBtn").addEventListener("click", () => preview().catch((error) => setStatus(error.message, "error")));
       $("buildPlanBtn").addEventListener("click", () => buildPlan().catch((error) => setStatus(error.message, "error")));
       $("createCategoriesBtn").addEventListener("click", () => createMissingCategories().catch((error) => setStatus(error.message, "error")));
+      $("createPartsBtn").addEventListener("click", () => createParts().catch((error) => setStatus(error.message, "error")));
+      $("prefetchImagesBtn").addEventListener("click", () => prefetchImages().catch((error) => setStatus(error.message, "error")));
+      $("retryFailedImagesBtn").addEventListener("click", () => prefetchImages(lastPrefetchFailures.map((item) => item.url)).catch((error) => setStatus(error.message, "error")));
+      $("excludeFailedImagesBtn").addEventListener("click", () => excludeFailedImagesAndProceed().catch((error) => setStatus(error.message, "error")));
+      $("importDetailsBtn").addEventListener("click", () => importPartDetails().catch((error) => setStatus(error.message, "error")));
+      $("importProcurementBtn").addEventListener("click", () => importProcurement().catch((error) => setStatus(error.message, "error")));
+      $("createStockBtn").addEventListener("click", () => createStock().catch((error) => setStatus(error.message, "error")));
+      $("enableStockImport").addEventListener("change", () => {
+        const rows = lastPlan?.rows || [];
+        $("createStockBtn").disabled = !lastPlan?.ready || !!lastPlan?.summary?.create ||
+          !rows.some((row) => row.stock_action !== "none") || !$("enableStockImport").checked;
+      });
+      $("refreshCleanupBtn")?.addEventListener("click", () =>
+        loadCleanupCatalog().catch((error) => setStatus(error.message, "error"))
+      );
+      $("clearSelectedPrefetchBtn")?.addEventListener("click", () =>
+        runManualCleanup("clear_prefetch").catch((error) => setStatus(error.message, "error"))
+      );
+      $("deleteSelectedCapturesBtn")?.addEventListener("click", () =>
+        runManualCleanup("delete_captures").catch((error) => setStatus(error.message, "error"))
+      );
+      $("pinCurrentCaptureBtn")?.addEventListener("click", async () => {
+        try {
+          const result = await api(`captures/${captureId}/pin/`, {
+            method:"POST", body:JSON.stringify({pinned:!currentCapturePinned})
+          });
+          currentCapturePinned = result.pinned;
+          $("pinCurrentCaptureBtn").textContent = `${currentCapturePinned ? "Unpin" : "Pin"} Current Capture`;
+          await loadCleanupCatalog();
+        } catch (error) { setStatus(error.message, "error"); }
+      });
       $("saveProfileBtn").addEventListener("click", () => saveProfile().catch((error) => setStatus(error.message, "error")));
       $("newProfileBtn").addEventListener("click", () => loadProfile(null));
       $("loadProfileBtn").addEventListener("click", () => {
@@ -543,6 +1304,13 @@
 
       resetRules();
       refreshProfiles().catch((error) => setStatus(`Could not load profiles: ${error.message}`, "error"));
+      loadDatasetPage().catch((error) => setStatus(`Could not load dataset rows: ${error.message}`, "error"));
+      loadCleanupCatalog().catch((error) => {
+        if ($("cleanupResult")) {
+          $("cleanupResult").className = "status visible error";
+          $("cleanupResult").textContent = `Could not load cleanup candidates: ${error.message}`;
+        }
+      });
     })();
   </script>
 </body>

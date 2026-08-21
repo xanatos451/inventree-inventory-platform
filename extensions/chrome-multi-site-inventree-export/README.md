@@ -45,6 +45,7 @@ Select **Save Connection Settings**. The token is stored in Chrome's local exten
 - McMaster-Carr category and product pages
 - Bolt Depot product tables and parent/child catalog pages
 - Amazon order and product pages
+- Fastenal category/list and product pages
 
 ## Workflow
 
@@ -58,6 +59,19 @@ Select **Save Connection Settings**. The token is stored in Chrome's local exten
 8. Select **Open Import Field Workspace**.
 9. Inspect field values, coverage, types, common values, and row context.
 10. Create or select a mapping profile and preview the transformation in InvenTree.
+
+## Import independently collected datasets
+
+Expand **Import a JSON or CSV dataset** to load rows collected outside a supported supplier page. The extension accepts:
+
+- a raw capture JSON object containing `rows`
+- an API submission envelope containing `payload.rows`
+- a JSON array of row objects
+- a CSV file with a unique header row, including quoted commas and multiline values
+
+The imported rows use the normal local preview, raw download, import-queue submission, and InvenTree mapping workspace. Select a **Source identifier** so mapping profiles can be scoped to the dataset's supplier or origin. A **Source URL** is recommended for provenance and host/path-scoped profiles, but offline datasets may omit it. The optional category and subcategory values are fallbacks: they populate only missing or blank row fields and never replace taxonomy already present in the dataset.
+
+Files are limited to 8 MiB and 5,000 rows in the extension so they fit the plugin's default payload limit. Loading a file does not transmit it; data leaves the browser only when **Submit to Import Queue** is selected.
 
 ## Exporter profiles
 
@@ -77,7 +91,9 @@ The **Maximum item-detail pages** setting is a safety limit. If a table contains
 
 McMaster list captures use a focused temporary browser window for product-detail enrichment. The window is reused across products, reports persistent badge progress, and closes automatically after capture.
 
-McMaster detail rows include mapping-friendly `Spec_*` fields in addition to `ProductDetailSpecs`. The parser repairs common supplier-page character-decoding artifacts, removes duplicate breadcrumb labels, ignores placeholder images, and strips McMaster's `ver=ImageNotFound` marker from otherwise valid product-image paths.
+McMaster detail rows include mapping-friendly `Spec_*` fields in addition to `ProductDetailSpecs`. The parser repairs common supplier-page character-decoding artifacts, removes duplicate breadcrumb labels, ignores placeholder images, and strips McMaster's `ver=ImageNotFound` marker from otherwise valid product-image paths. It also searches the complete rendered detail frame, including lower product-detail sections, lazy-loaded image attributes, linked full-resolution files, `srcset` variants, SVG image references, and inline background images. `Image URL` contains the preferred primary product image, while newline-delimited `Image URLs` and `Image Count` preserve the ordered, deduplicated gallery without McMaster navigation, logo, category, or placeholder graphics.
+
+Amazon product captures combine browser-visible content with the page's structured product data. Rows include stable identifiers (ASIN, supplier SKU, model and manufacturer part numbers, UPC/EAN when published), title, brand/manufacturer, taxonomy, description and feature bullets, selected variations, offer/availability details, technical specifications, a canonical product URL, and the available product-image gallery. `Image URL` is the preferred primary image; newline-delimited `Image URLs` preserves the gallery for import mapping.
 
 ## Raw downloads
 
