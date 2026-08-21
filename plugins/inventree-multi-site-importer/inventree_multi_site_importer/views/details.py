@@ -83,10 +83,6 @@ class ImportCapturePartDetailsView(APIView):
                 status=status.HTTP_409_CONFLICT,
             )
 
-        # File and attachment writes below are not one database transaction.
-        # Protect the capture before the first inventory mutation is attempted.
-        _mark_inventory_write(capture, "part-details")
-
         content_type = ContentType.objects.get_for_model(Part)
         parameter_names = sorted({
             name
@@ -188,6 +184,11 @@ class ImportCapturePartDetailsView(APIView):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        # File and attachment writes below are not one database transaction.
+        # Protect the capture now that every preflight check has passed and the
+        # first inventory mutation is about to happen.
+        _mark_inventory_write(capture, "part-details")
 
         parameter_count = 0
         notes_count = 0

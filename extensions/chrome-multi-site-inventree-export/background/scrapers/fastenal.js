@@ -1,6 +1,6 @@
-export // Injected into the active Fastenal tab via chrome.scripting.executeScript; must stay self-contained
+// Injected into the active Fastenal tab via chrome.scripting.executeScript; must stay self-contained
 // (no closures over background-script state - it runs in the page's own execution context).
-function scrapeFastenalPageData() {
+export function scrapeFastenalPageData() {
   function normalizeText(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
   }

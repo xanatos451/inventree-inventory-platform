@@ -1,6 +1,6 @@
-export // Injected into the active Bolt Depot tab via chrome.scripting.executeScript; must stay self-contained
+// Injected into the active Bolt Depot tab via chrome.scripting.executeScript; must stay self-contained
 // (no closures over background-script state - it runs in the page's own execution context).
-function scrapeBoltDepotPageData() {
+export function scrapeBoltDepotPageData() {
   function normalizeText(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
   }
@@ -376,7 +376,7 @@ export function scrapeBoltDepotProductDetailData() {
 
   const headingTitle = normalizeText(document.querySelector("h1")?.textContent || "");
   const documentTitle = normalizeText(document.title || "");
-  const title = headingTitle && !/^mcmaster-carr$/i.test(headingTitle)
+  const title = headingTitle && !/^bolt depot$/i.test(headingTitle)
     ? headingTitle
     : (documentTitle || headingTitle);
   const breadcrumbs = parseBreadcrumbs();

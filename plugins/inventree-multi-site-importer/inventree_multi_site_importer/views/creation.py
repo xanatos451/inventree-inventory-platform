@@ -230,6 +230,9 @@ class CreateCaptureCategoriesView(APIView):
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
+        if created:
+            _mark_inventory_write(capture, "categories")
+
         return Response({
             "capture_id": capture.pk,
             "created_count": len(created),
