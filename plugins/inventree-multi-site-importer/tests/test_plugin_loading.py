@@ -4,7 +4,16 @@ import importlib
 import sys
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
+
+
+def _views_source(root):
+    """Concatenate the views/ package source; views.py is split across modules."""
+    views_dir = root / "inventree_multi_site_importer" / "views"
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(views_dir.glob("*.py"))
+    )
 
 
 class PluginLoadingTests(unittest.TestCase):
@@ -51,11 +60,8 @@ class PluginLoadingTests(unittest.TestCase):
         self.assertEqual(models_source.count('app_label = "inventree_multi_site_importer"'), 6)
 
     def test_views_use_inventree_configured_authentication(self):
-        views_source = (
-            __import__("pathlib").Path(__file__).parents[1]
-            / "inventree_multi_site_importer"
-            / "views.py"
-        ).read_text(encoding="utf-8")
+        root = Path(__file__).parents[1]
+        views_source = _views_source(root)
         self.assertNotIn("rest_framework.authentication", views_source)
         self.assertNotIn("authentication_classes =", views_source)
         self.assertIn("check_user_permission(request.user, PartCategory, \"add\")", views_source)
@@ -111,22 +117,15 @@ class PluginLoadingTests(unittest.TestCase):
         self.assertIn("existing_part_mode:existingPartMode", template)
         self.assertIn("lastPlan.detail_import_image_limit", template)
         self.assertIn("Importing Batch ${index + 1}/${batches.length}", template)
-        self.assertIn('"detail_import_image_limit": image_limit', (
-            root / "inventree_multi_site_importer" / "views.py"
-        ).read_text(encoding="utf-8"))
-        self.assertIn('request.data.get("existing_part_mode") or "update"', (
-            root / "inventree_multi_site_importer" / "views.py"
-        ).read_text(encoding="utf-8"))
-        self.assertIn("download_remote_image(", (
-            root / "inventree_multi_site_importer" / "views.py"
-        ).read_text(encoding="utf-8"))
+        views_source = _views_source(root)
+        self.assertIn('"detail_import_image_limit": image_limit', views_source)
+        self.assertIn('request.data.get("existing_part_mode") or "update"', views_source)
+        self.assertIn("download_remote_image(", views_source)
         self.assertIn("cached_images_used", template)
         self.assertIn("explicitly excluded", template)
         self.assertIn("Verification succeeded: all mapped category paths now exist.", template)
         self.assertIn("The server will rebuild the live plan before writing.", template)
-        self.assertIn("part.full_clean()", (
-            root / "inventree_multi_site_importer" / "views.py"
-        ).read_text(encoding="utf-8"))
+        self.assertIn("part.full_clean()", views_source)
         self.assertIn('key === "image_url" ? imagePreview(item[key])', template)
         self.assertIn('referrerpolicy="no-referrer"', template)
         self.assertIn("def validate_rules", serializers)
