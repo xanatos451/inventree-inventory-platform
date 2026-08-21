@@ -4,7 +4,16 @@ import importlib
 import sys
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import patch
+
+
+def _views_source(root):
+    """Concatenate the views/ package source; views.py is split across modules."""
+    views_dir = root / "inventree_multi_site_importer" / "views"
+    return "\n".join(
+        path.read_text(encoding="utf-8") for path in sorted(views_dir.glob("*.py"))
+    )
 
 
 class PluginLoadingTests(unittest.TestCase):
@@ -51,11 +60,8 @@ class PluginLoadingTests(unittest.TestCase):
         self.assertEqual(models_source.count('app_label = "inventree_multi_site_importer"'), 6)
 
     def test_views_use_inventree_configured_authentication(self):
-        views_source = (
-            __import__("pathlib").Path(__file__).parents[1]
-            / "inventree_multi_site_importer"
-            / "views.py"
-        ).read_text(encoding="utf-8")
+        root = Path(__file__).parents[1]
+        views_source = _views_source(root)
         self.assertNotIn("rest_framework.authentication", views_source)
         self.assertNotIn("authentication_classes =", views_source)
         self.assertIn("check_user_permission(request.user, PartCategory, \"add\")", views_source)
@@ -71,8 +77,16 @@ class PluginLoadingTests(unittest.TestCase):
             / "inventree_multi_site_importer"
             / "capture_workspace.html"
         ).read_text(encoding="utf-8")
+        workspace_js = (
+            root
+            / "inventree_multi_site_importer"
+            / "static"
+            / "capture_workspace.js"
+        ).read_text(encoding="utf-8")
         urls = (root / "inventree_multi_site_importer" / "urls.py").read_text(encoding="utf-8")
         serializers = (root / "inventree_multi_site_importer" / "serializers.py").read_text(encoding="utf-8")
+        self.assertIn("{% load static %}", template)
+        self.assertIn("{% static 'capture_workspace.js' %}", template)
         for control in (
             'id="standardRules"',
             'id="parameterRules"',
@@ -93,11 +107,11 @@ class PluginLoadingTests(unittest.TestCase):
             'id="imagePrefetchResult"',
             'id="saveProfileBtn"',
             'id="profileSelect"',
-            'class="rule-mode"',
-            'class="rule-template"',
             'json_script:"source-fields-data"',
         ):
             self.assertIn(control, template)
+        for control in ('class="rule-mode"', 'class="rule-template"'):
+            self.assertIn(control, workspace_js)
         self.assertIn('path("mapping-profiles/<int:pk>/"', urls)
         self.assertIn('path("captures/<int:pk>/plan/"', urls)
         self.assertIn('path("captures/<int:pk>/categories/"', urls)
@@ -107,28 +121,21 @@ class PluginLoadingTests(unittest.TestCase):
         self.assertIn('path("captures/<int:pk>/details/"', urls)
         self.assertIn('path("captures/<int:pk>/images/prefetch/"', urls)
         self.assertIn('path("captures/<int:pk>/images/exclude-failures/"', urls)
-        self.assertIn("selected_row_indices:selectedRowsPayload()", template)
-        self.assertIn("existing_part_mode:existingPartMode", template)
-        self.assertIn("lastPlan.detail_import_image_limit", template)
-        self.assertIn("Importing Batch ${index + 1}/${batches.length}", template)
-        self.assertIn('"detail_import_image_limit": image_limit', (
-            root / "inventree_multi_site_importer" / "views.py"
-        ).read_text(encoding="utf-8"))
-        self.assertIn('request.data.get("existing_part_mode") or "update"', (
-            root / "inventree_multi_site_importer" / "views.py"
-        ).read_text(encoding="utf-8"))
-        self.assertIn("download_remote_image(", (
-            root / "inventree_multi_site_importer" / "views.py"
-        ).read_text(encoding="utf-8"))
-        self.assertIn("cached_images_used", template)
-        self.assertIn("explicitly excluded", template)
-        self.assertIn("Verification succeeded: all mapped category paths now exist.", template)
-        self.assertIn("The server will rebuild the live plan before writing.", template)
-        self.assertIn("part.full_clean()", (
-            root / "inventree_multi_site_importer" / "views.py"
-        ).read_text(encoding="utf-8"))
-        self.assertIn('key === "image_url" ? imagePreview(item[key])', template)
-        self.assertIn('referrerpolicy="no-referrer"', template)
+        self.assertIn("selected_row_indices:selectedRowsPayload()", workspace_js)
+        self.assertIn("existing_part_mode:existingPartMode", workspace_js)
+        self.assertIn("lastPlan.detail_import_image_limit", workspace_js)
+        self.assertIn("Importing Batch ${index + 1}/${batches.length}", workspace_js)
+        views_source = _views_source(root)
+        self.assertIn('"detail_import_image_limit": image_limit', views_source)
+        self.assertIn('request.data.get("existing_part_mode") or "update"', views_source)
+        self.assertIn("download_remote_image(", views_source)
+        self.assertIn("cached_images_used", workspace_js)
+        self.assertIn("explicitly excluded", workspace_js)
+        self.assertIn("Verification succeeded: all mapped category paths now exist.", workspace_js)
+        self.assertIn("The server will rebuild the live plan before writing.", workspace_js)
+        self.assertIn("part.full_clean()", views_source)
+        self.assertIn('key === "image_url" ? imagePreview(item[key])', workspace_js)
+        self.assertIn('referrerpolicy="no-referrer"', workspace_js)
         self.assertIn("def validate_rules", serializers)
 
     def test_part_image_gallery_panel_and_static_asset_are_packaged(self):

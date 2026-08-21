@@ -1,6 +1,10 @@
 {
   "folders": [
     {
+      "name": "Repository Root",
+      "path": "."
+    },
+    {
       "name": "Extensions - Multi-Site Capture",
       "path": "extensions/chrome-multi-site-inventree-export"
     },
@@ -37,7 +41,12 @@
     "search.exclude": {
       "**/.artifacts/**": true,
       "**/node_modules/**": true,
-      "**/__pycache__/**": true
+      "**/__pycache__/**": true,
+      "**/.venv/**": true,
+      "**/dist/**": true,
+      "**/build/**": true,
+      "**/*.egg-info/**": true,
+      "**/package-lock.json": true
     }
   },
   "extensions": {

@@ -4,12 +4,15 @@
   "private": true,
   "description": "Integration tests for the Multi-Site Inventory Capture browser extension",
   "scripts": {
-    "validate": "npm run test:syntax && npm run test:integration",
+    "validate": "npm run test:syntax && npm run lint && npm run test:integration",
     "test:syntax": "node --check background.js && node --check popup.js",
+    "lint": "eslint .",
     "test:integration": "playwright test",
     "test:integration:headed": "playwright test --headed"
   },
   "devDependencies": {
-    "@playwright/test": "^1.55.0"
+    "@playwright/test": "^1.55.0",
+    "eslint": "^10.9.0",
+    "globals": "^17.11.0"
   }
 }

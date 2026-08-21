@@ -62,14 +62,30 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Install capture extension dependencies
+        working-directory: extensions/chrome-multi-site-inventree-export
+        run: npm ci
+
       - name: Check capture extension scripts
         working-directory: extensions/chrome-multi-site-inventree-export
         run: npm run test:syntax
+
+      - name: Lint capture extension scripts
+        working-directory: extensions/chrome-multi-site-inventree-export
+        run: npm run lint
+
+      - name: Install SVG capture extension dependencies
+        working-directory: extensions/chrome-svg-capture-extension
+        run: npm ci
 
       - name: Check SVG capture extension scripts
         run: |
           node --check extensions/chrome-svg-capture-extension/background.js
           node --check extensions/chrome-svg-capture-extension/popup.js
+
+      - name: Lint SVG capture extension scripts
+        working-directory: extensions/chrome-svg-capture-extension
+        run: npm run lint
 
   extension-integration:
     name: Supplier capture integration (${{ matrix.os }})

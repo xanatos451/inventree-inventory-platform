@@ -87,9 +87,8 @@ After changing pinned SHAs, run `just check` before opening a pull request.
 
 When using coding agents (Copilot, Codex, or similar), follow repository AI governance files:
 
-- `.github/copilot-instructions.md` for Copilot-specific behavior.
-- `AGENTS.md` for cross-agent repository rules.
-- `.agents/*.md` for component-scoped guidance.
+- `AGENTS.md` for cross-agent repository rules (also linked from `.github/copilot-instructions.md`).
+- `.github/instructions/*.instructions.md` for component-scoped guidance, auto-attached when editing files in that component.
 
 Agents should run the same validation commands documented above and include test notes in pull request summaries.
 

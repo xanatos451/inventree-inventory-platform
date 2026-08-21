@@ -148,6 +148,6 @@ npx playwright install chromium
 npm run validate
 ```
 
-`validate` runs JavaScript syntax checks and Playwright integration tests. Playwright loads the unpacked extension in Chromium and verifies settings, capture modes, detail enrichment, errors, and the raw plugin submission contract.
+`validate` runs JavaScript syntax checks, ESLint (dead-code and file-size guards), and Playwright integration tests. Playwright loads the unpacked extension in Chromium and verifies settings, capture modes, detail enrichment, errors, and the raw plugin submission contract.
 
 From the repository root, `just extension-test` runs the browser suite, `just check` validates both components and builds the plugin wheel, and `just ci` installs extension dependencies before performing the complete check.

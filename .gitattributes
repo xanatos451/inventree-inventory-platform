@@ -14,3 +14,5 @@
 *.whl binary
 *.crx binary
 *.pem binary
+
+package-lock.json linguist-generated=true

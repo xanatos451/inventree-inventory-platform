@@ -41,8 +41,10 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 
 if django is not None and settings is not None:
     import inventree_multi_site_importer.views as views
+    from inventree_multi_site_importer.views import ai as views_ai
 else:
     views = None
+    views_ai = None
 
 _mapping_spec = importlib.util.spec_from_file_location(
     "supplier_mapping",
@@ -130,7 +132,7 @@ class CaptureContractTests(unittest.TestCase):
             "identity": {"product_name": "Socket Head Cap Screw"},
         }]
 
-        with patch.object(views, "_capture_or_404", return_value=fake_capture), patch.object(views, "_normalized_capture_items", return_value=expected_items):
+        with patch.object(views_ai, "_capture_or_404", return_value=fake_capture), patch.object(views_ai, "_normalized_capture_items", return_value=expected_items):
             request = APIRequestFactory().post("/captures/21/ai/normalize/", data={}, format="json")
             request.user = SimpleNamespace(is_authenticated=True, is_staff=False, is_active=True)
             response = views.CaptureNormalizeView.as_view()(request, pk=21)
@@ -156,7 +158,7 @@ class CaptureContractTests(unittest.TestCase):
         }]
         ranked_matches = [{"part_id": 7, "score": 0.91, "part_name": "Socket Head Cap Screw"}]
 
-        with patch.object(views, "_capture_or_404", return_value=fake_capture), patch.object(views, "_normalized_capture_items", return_value=expected_items), patch.object(views, "_candidate_parts_for_item", return_value=[{"pk": 7, "name": "Socket Head Cap Screw", "IPN": "SCR-1"}]), patch.object(views, "build_candidate_matches", return_value=ranked_matches):
+        with patch.object(views_ai, "_capture_or_404", return_value=fake_capture), patch.object(views_ai, "_normalized_capture_items", return_value=expected_items), patch.object(views_ai, "_candidate_parts_for_item", return_value=[{"pk": 7, "name": "Socket Head Cap Screw", "IPN": "SCR-1"}]), patch.object(views_ai, "build_candidate_matches", return_value=ranked_matches):
             request = APIRequestFactory().post("/captures/22/ai/candidates/", data={"limit": 3}, format="json")
             request.user = SimpleNamespace(is_authenticated=True, is_staff=False, is_active=True)
             response = views.CaptureCandidatesView.as_view()(request, pk=22)
@@ -171,7 +173,7 @@ class CaptureContractTests(unittest.TestCase):
         fake_capture = SimpleNamespace(pk=23, source="fastenal", profile_id=None, payload={"rows": []})
         summary = {"processed": 2, "learned_updates": 1}
 
-        with patch.object(views, "_capture_or_404", return_value=fake_capture), patch.object(views, "_process_ai_decisions", return_value=summary):
+        with patch.object(views_ai, "_capture_or_404", return_value=fake_capture), patch.object(views_ai, "_process_ai_decisions", return_value=summary):
             request = APIRequestFactory().post(
                 "/captures/23/ai/decisions/",
                 data={
