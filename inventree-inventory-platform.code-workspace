@@ -45,7 +45,8 @@
       "**/.venv/**": true,
       "**/dist/**": true,
       "**/build/**": true,
-      "**/*.egg-info/**": true
+      "**/*.egg-info/**": true,
+      "**/package-lock.json": true
     }
   },
   "extensions": {
