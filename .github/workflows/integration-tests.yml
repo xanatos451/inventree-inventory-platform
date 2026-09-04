@@ -17,6 +17,7 @@ on:
       - ".gitattributes"
       - "ARTIFACTS.md"
       - "CONTRIBUTING.md"
+      - "README.md"
       - "justfile"
   pull_request:
     branches: [main]
@@ -31,6 +32,7 @@ on:
       - ".gitattributes"
       - "ARTIFACTS.md"
       - "CONTRIBUTING.md"
+      - "README.md"
       - "justfile"
   workflow_dispatch:
 
