@@ -39,3 +39,7 @@ It groups components by type (extensions, plugin, scripts) and includes recommen
 ## Artifacts
 
 Generated outputs are stored under `.artifacts/` and are excluded from source control. See `ARTIFACTS.md` for layout and handling guidance.
+
+## Documentation Scope
+
+Repository and component READMEs remain the source of truth for development, build, and validation procedures. End-user and operational runbooks belong in the private home-lab documentation space.
